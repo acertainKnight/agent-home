@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy to config.json (gitignored) and edit. install.sh reads this.",
+
+  "harnesses": {
+    "claude-code": true,
+    "claude-code-work": false,
+    "opencode": true,
+    "codex": true
+  },
+
+  "litellm": true,
+
+  "_claude_in_opencode": "OPT-IN, BAN RISK. Reuses your Claude subscription OAuth token inside opencode via the opencode-claude-auth plugin. Anthropic's ToS restricts subscription tokens to official clients and has enforced with account bans since Jan 2026. false = leave Claude to Claude Code only (recommended for shared/team use).",
+  "claude_in_opencode": false
+}

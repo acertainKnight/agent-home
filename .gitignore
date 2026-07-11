@@ -1,0 +1,17 @@
+# Per-user config
+config.json
+venv/
+__pycache__/
+
+# --- Personal content (NOT shared) ---
+# Your skills/memory/instructions are yours. The repo ships the TOOLING; each
+# user populates their own canonical/ locally via `./install.sh` (sync --adopt
+# pulls in their existing ~/.claude content).
+#
+# To sync YOUR OWN content across YOUR machines: push to a PRIVATE remote and
+# comment out the five lines below. Never do this on a repo you share.
+canonical/skills/
+canonical/agents/
+canonical/commands/
+canonical/memory/
+canonical/AGENTS.md

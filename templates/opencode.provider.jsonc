@@ -1,0 +1,12 @@
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM (ChatGPT sub + router)",
+      "options": { "baseURL": "http://localhost:4000/v1" },
+      "models": {
+        "chatgpt/gpt-5.3-codex": { "name": "GPT-5.3 Codex (ChatGPT plan)" },
+        "chatgpt/gpt-5.4": { "name": "GPT-5.4 (ChatGPT plan)" },
+        "chatgpt/gpt-5.4-pro": { "name": "GPT-5.4 Pro (ChatGPT plan)" }
+      }
+    }
+  }

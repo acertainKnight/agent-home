@@ -1,0 +1,33 @@
+# LiteLLM proxy: one OpenAI-compatible endpoint (http://localhost:4000) fronting
+# the ChatGPT subscription, OpenRouter, and local models.
+# Run: litellm --config ~/Documents/python/agent-home/litellm/config.yaml
+# First chatgpt/* call triggers a device-code OAuth login (URL printed in logs);
+# tokens persist locally (CHATGPT_TOKEN_DIR) so it's one-time.
+
+model_list:
+  # --- ChatGPT subscription (no per-token billing; draws on plan limits) ---
+  - model_name: chatgpt/gpt-5.3-codex
+    model_info: { mode: responses }
+    litellm_params: { model: chatgpt/gpt-5.3-codex }
+  - model_name: chatgpt/gpt-5.4
+    model_info: { mode: responses }
+    litellm_params: { model: chatgpt/gpt-5.4 }
+  - model_name: chatgpt/gpt-5.4-pro
+    model_info: { mode: responses }
+    litellm_params: { model: chatgpt/gpt-5.4-pro }
+
+  # --- Third-party via OpenRouter (pay-per-token; export OPENROUTER_API_KEY) ---
+  - model_name: openrouter/*
+    litellm_params:
+      model: openrouter/*
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # --- Local models: point any harness at Ollama/LM Studio directly, or route
+  # here by uncommenting (requires the local server running):
+  # - model_name: local/*
+  #   litellm_params: { model: ollama/*, api_base: http://localhost:11434 }
+
+# Claude Max pass-through is documented by LiteLLM
+# (docs.litellm.ai/docs/tutorials/claude_code_max_subscription) but deliberately
+# NOT configured: Anthropic ToS restricts subscription tokens to official
+# clients and enforcement is active as of 2026. Claude Max = Claude Code.
