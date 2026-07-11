@@ -9,6 +9,7 @@ Usage:
   ./sync.py --status   show state of every mapping
 """
 import argparse
+import filecmp
 import json
 import os
 import shutil
@@ -35,16 +36,23 @@ HARNESSES = {
     "claude-code-work": [
         (CANON / "AGENTS.md", HOME / ".claude-work/CLAUDE.md"),
     ],
-    # opencode: reads ~/.config/opencode/AGENTS.md + ~/.agents/skills, and
-    # natively ~/.claude/skills + ~/.claude/CLAUDE.md as fallbacks.
+    # opencode: reads ~/.config/opencode/AGENTS.md, its own command/ dir, and
+    # ~/.agents/skills + ~/.claude/skills natively.
     "opencode": [
         (CANON / "AGENTS.md", HOME / ".config/opencode/AGENTS.md"),
+        (CANON / "commands", HOME / ".config/opencode/command"),  # note: singular
     ],
-    # Codex CLI: reads ~/.codex/AGENTS.md + ~/.agents/skills.
+    # Codex CLI: reads ~/.codex/AGENTS.md, ~/.codex/prompts/ (slash commands),
+    # + ~/.agents/skills.
     "codex": [
         (CANON / "AGENTS.md", HOME / ".codex/AGENTS.md"),
+        (CANON / "commands", HOME / ".codex/prompts"),
     ],
 }
+
+# Native skill dirs to MERGE into the store on --adopt (skills reach these
+# harnesses via ~/.agents/skills, so we import but don't keep a back-link).
+SKILL_SWEEP = [HOME / ".config/opencode/skills", HOME / ".codex/skills"]
 
 
 def load_config():
@@ -129,23 +137,72 @@ def status():
             print(f"MISS  {dst}")
 
 
+def _harness_of(path):
+    s = str(path)
+    if "/.claude-work/" in s:
+        return "claude-work"
+    if "/opencode/" in s:
+        return "opencode"
+    if "/.codex/" in s:
+        return "codex"
+    if "/.claude/" in s:
+        return "claude"
+    return "other"
+
+
+def _same(a, b):
+    """Deep equality for files or directory trees."""
+    if a.is_dir() and b.is_dir():
+        c = filecmp.dircmp(a, b)
+        if c.left_only or c.right_only or c.diff_files or c.funny_files:
+            return False
+        return all(_same(a / d, b / d) for d in c.common_dirs)
+    if a.is_file() and b.is_file():
+        return filecmp.cmp(a, b, shallow=False)
+    return False
+
+
+def merge_into_store(store, src, tag):
+    """Union a harness dir/file into the store. Same-name-different-content is
+    kept alongside as `name.from-<harness>` so nothing is ever lost."""
+    if src.is_dir():
+        store.mkdir(parents=True, exist_ok=True)
+        for item in list(src.iterdir()):
+            target = store / item.name
+            if not target.exists():
+                shutil.move(str(item), str(target))
+                print(f"  + {store.name}/{item.name} (from {tag})")
+            elif _same(item, target):
+                (shutil.rmtree if item.is_dir() else lambda p: Path(p).unlink())(item)
+            else:
+                alt = store / f"{item.stem}.from-{tag}{item.suffix}"
+                shutil.move(str(item), str(alt))
+                print(f"  ! conflict {item.name}: kept as {alt.name} (from {tag})", file=sys.stderr)
+        shutil.rmtree(src)
+    else:  # instruction file: concatenate distinct content under a header
+        if not store.exists():
+            shutil.move(str(src), str(store))
+            print(f"  + {store.name} (from {tag})")
+            return
+        have, add = store.read_text(), src.read_text()
+        if add.strip() and add.strip() not in have:
+            store.write_text(have.rstrip() + f"\n\n# --- merged from {tag} ---\n\n" + add.lstrip())
+            print(f"  ~ {store.name}: merged instructions from {tag}", file=sys.stderr)
+        src.unlink()
+
+
 def adopt():
-    """Move real files/dirs from SOURCE harnesses into ~/.agent-home, link back."""
+    """Merge every SOURCE harness's real content into ~/.agent-home (union;
+    nothing lost), then apply() links it all back."""
     CANON.mkdir(parents=True, exist_ok=True)
     for src, dst in links_for(source_names()):
         if dst.is_symlink() or not dst.exists():
             continue
-        if src.is_dir() and not any(src.iterdir()):
-            src.rmdir()
-        if src.exists():
-            if src.is_file() and dst.is_file() and src.read_bytes() == dst.read_bytes():
-                dst.unlink()  # identical copy; symlink replaces it below via apply()
-                continue
-            print(f"skip {dst}: both real; merge into {src} manually", file=sys.stderr)
-            continue
-        print(f"adopt {dst} -> {src}")
-        shutil.move(str(dst), str(src))
-        dst.symlink_to(src)
+        merge_into_store(src, dst, _harness_of(dst))
+    # Native skill dirs that aren't in the link map (imported, not back-linked).
+    for d in SKILL_SWEEP:
+        if d.is_dir() and not d.is_symlink():
+            merge_into_store(CANON / "skills", d, _harness_of(d))
 
 
 def apply():

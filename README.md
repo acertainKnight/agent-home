@@ -39,9 +39,21 @@ litellm --config litellm/config.yaml    # complete the device-code URL once
 ```
 
 `install.sh` asks two things: which harnesses you **currently use** (it imports
-their existing skills/memory/instructions into `~/.agent-home`) and which to
-**set up** (it links the store into them). Re-runnable anytime; `--yes` reuses
-your saved `config.json`, `--status` just inspects.
+their existing skills/memory/instructions/commands into `~/.agent-home`) and
+which to **set up** (it links the store into them). Re-runnable anytime; `--yes`
+reuses your saved `config.json`, `--status` just inspects.
+
+### Full merge — nothing is left behind
+
+`--adopt` doesn't just copy Claude Code's config; it **unions every source
+harness's native content** into the store: Claude commands (`~/.claude/commands`),
+opencode commands (`~/.config/opencode/command`), Codex prompts
+(`~/.codex/prompts`), and native skill dirs all merge into one place, then link
+back so a command written once shows up everywhere. Same-named-but-different
+files are kept side by side as `name.from-<harness>` (never silently dropped);
+divergent instruction files (`CLAUDE.md` vs `AGENTS.md`) are concatenated under a
+`merged from <harness>` header. Both Claude accounts (personal `~/.claude` + work
+`~/.claude-work`) are sources. See `test_merge.py` for the guarantees.
 
 ## What reads what
 
@@ -100,10 +112,20 @@ documented trigger). The `opencode-claude-auth` route works today but is
 unsanctioned. Turn it on only for your own account with eyes open; leave it off
 for shared/team installs. Full sourcing in MEMBERSHIPS.md.
 
+### Multiple accounts (Claude, ChatGPT, or any provider)
+
+`config.json.accounts` is provider-agnostic — list as many as you want and switch
+between them in any harness. `anthropic-sub` accounts point at a `CLAUDE_CONFIG_DIR`
+(exactly like your `~/.claude` vs `~/.claude-work` split), `chatgpt-sub` accounts
+each get their own token dir + LiteLLM port, `openai-key` accounts a key + base URL.
+Full per-provider switching guide in MEMBERSHIPS.md.
+
 ### Proving it's the membership, not API credits
 
-`scripts/verify-claude-membership.sh` reads your Claude Code OAuth token (never
-prints it), confirms it's an `sk-ant-oat*` **subscription** token (an API key is
-`sk-ant-api*` and is the only thing that can bill credits), makes one real
+`scripts/verify-claude-membership.sh [account]` reads that account's OAuth token
+(never prints it), confirms it's an `sk-ant-oat*` **subscription** token (an API
+key is `sk-ant-api*` and is the only thing that can bill credits), makes one real
 request, and shows the `anthropic-ratelimit-unified-*` headers — the Max plan's
-5-hour/7-day pools, not API metering. Ran clean here: "MEMBERSHIP OK".
+5-hour/7-day pools, not API metering. Ran clean here for `claude-personal`:
+"MEMBERSHIP OK". `scripts/claude-token.sh <account>` is the underlying token
+primitive any harness/provider can call.

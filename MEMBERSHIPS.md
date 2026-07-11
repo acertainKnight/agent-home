@@ -17,8 +17,10 @@ unofficial OAuth wrappers ~Jan 2026 (legal/compliance clarification Feb 19 2026;
 opencode issue #6930 "…violates ToS & Results in Ban"). The community plugins
 (opencode-anthropic-auth, opencode-claude-auth ~1.1k★, opencode-with-claude)
 work but their own READMEs warn of bans, especially for automated/heavy loops.
-**Decision: do not shim Claude Max into other harnesses. Claude Code stays the
-Claude-membership harness.** Revisit if Anthropic ships an official program.
+**Default: Claude stays in Claude Code (`claude_in_opencode: false`).** It's an
+explicit per-user opt-in to reuse a Claude subscription in opencode (via
+opencode-claude-auth). Nick has opted in for his own account; teammates decide
+for themselves. Keep it to light interactive use — no automated loops.
 
 ## The architecture
 
@@ -64,3 +66,39 @@ litellm --config ~/Documents/python/agent-home/litellm/config.yaml
 - https://docs.litellm.ai/docs/tutorials/claude_code_max_subscription
 - https://github.com/ex-machina-co/opencode-anthropic-auth · griffinmartin/opencode-claude-auth · ianjwhite99/opencode-with-claude
 - https://github.com/anomalyco/opencode/issues/6930 · BerriAI/litellm#13380 · BerriAI/litellm#27175
+
+## Multiple accounts, any provider (the account model)
+
+Accounts are provider-agnostic — define as many as you want in
+`config.json.accounts`, each switchable in any harness. Three `provider` types:
+
+- **`anthropic-sub`** (Claude Max/Pro): `config_dir` (a `CLAUDE_CONFIG_DIR`, e.g.
+  `~/.claude` personal, `~/.claude-work` work) + optional `keychain`. This mirrors
+  exactly how you already run two Claude Code profiles.
+- **`chatgpt-sub`** (ChatGPT/Codex): `token_dir` (its own `CHATGPT_TOKEN_DIR` /
+  `CODEX_HOME`) so multiple ChatGPT logins don't collide, + a `port` for that
+  account's LiteLLM instance.
+- **`openai-key`** (OpenRouter and any OpenAI-compatible key): `env_key` + `base_url`.
+
+**One universal primitive** — `scripts/claude-token.sh <account>` returns a live
+subscription bearer token for any `anthropic-sub` account (keychain→file, refresh
+guidance), never printing it elsewhere. `scripts/verify-claude-membership.sh
+<account>` proves any Claude account runs on its membership, not API credits.
+
+**Switching per harness:**
+- *Claude accounts in Claude Code* — already native: `claude` vs
+  `CLAUDE_CONFIG_DIR=~/.claude-work claude`.
+- *Claude accounts in opencode* — opencode-claude-auth auto-detects multiple
+  keychain credentials; log each account in once
+  (`CLAUDE_CONFIG_DIR=<dir> claude`) and both appear. (Ban-risk opt-in.)
+- *ChatGPT accounts* — run one LiteLLM instance per account with its own
+  `CHATGPT_TOKEN_DIR` on its own port; each shows up as `chatgpt/*` models that
+  any harness selects by pointing at that port. Codex's native `codex login`
+  covers one ChatGPT account per `CODEX_HOME`.
+- *Key providers* — a LiteLLM model group per key; select by model name.
+
+**Tested here (2026-07-11):** `claude-personal` verified live on the Max
+subscription (`sk-ant-oat*`, `MEMBERSHIP OK`, `unified-5h` headers), and reused in
+opencode via the plugin. **Pending a login (not testable until then):**
+`claude-work` (no token on this machine yet — `CLAUDE_CONFIG_DIR=~/.claude-work
+claude` to activate) and any second ChatGPT account.
