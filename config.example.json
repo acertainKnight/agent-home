@@ -12,13 +12,10 @@
   "_adopt_from": "Sources: pull existing skills/memory/instructions/commands FROM these into the store (subset of targets).",
   "adopt_from": ["claude-code"],
 
-  "_accounts": "Provider-agnostic. Add as many as you like of any provider; each is switchable in any harness. provider = anthropic-sub | chatgpt-sub | openai-key. anthropic-sub: config_dir (a CLAUDE_CONFIG_DIR) + optional keychain. chatgpt-sub: token_dir (its own CHATGPT_TOKEN_DIR / CODEX_HOME so multiple ChatGPT logins don't collide) + port for its LiteLLM instance. openai-key: env_key + base_url.",
+  "_accounts": "ILLUSTRATIVE SHAPE ONLY — `make install` auto-detects YOUR real Claude accounts (from your ~/.claude* dirs) and asks about ChatGPT/keys; it does not use the entries below. Provider-agnostic, add any number of any type. provider = anthropic-sub (config_dir = a CLAUDE_CONFIG_DIR + optional keychain) | chatgpt-sub (token_dir = its own CHATGPT_TOKEN_DIR/CODEX_HOME so multiple logins don't collide + port for its LiteLLM instance) | openai-key (env_key + base_url).",
   "accounts": [
-    { "name": "claude-personal", "provider": "anthropic-sub", "config_dir": "~/.claude", "keychain": "Claude Code-credentials" },
-    { "name": "claude-work", "provider": "anthropic-sub", "config_dir": "~/.claude-work", "keychain": null },
-
-    { "name": "chatgpt-personal", "provider": "chatgpt-sub", "token_dir": "~/.agent-home/auth/chatgpt-personal", "port": 4001 },
-
+    { "name": "claude-main", "provider": "anthropic-sub", "config_dir": "~/.claude", "keychain": "Claude Code-credentials" },
+    { "name": "chatgpt-main", "provider": "chatgpt-sub", "token_dir": "~/.agent-home/auth/chatgpt-main", "port": 4001 },
     { "name": "openrouter", "provider": "openai-key", "env_key": "OPENROUTER_API_KEY", "base_url": "https://openrouter.ai/api/v1" }
   ],
 

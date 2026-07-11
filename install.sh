@@ -94,8 +94,31 @@ esac
 NONINTERACTIVE=false
 if [ "${1:-}" = "--yes" ] || [ ! -t 0 ]; then
   NONINTERACTIVE=true
-  [ -f config.json ] || cp config.example.json config.json
-  echo "Using existing config.json (non-interactive)."
+  if [ ! -f config.json ]; then
+    # Bootstrap from THIS machine: detected harnesses + auto-detected Claude
+    # accounts (never the checked-in example's accounts).
+    python3 - <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+H = Path.home()
+harnesses = {
+  "claude-code": (H/".claude").is_dir(),
+  "claude-code-work": (H/".claude-work").is_dir(),
+  "opencode": bool(__import__("shutil").which("opencode")) or (H/".config/opencode").is_dir(),
+  "codex": bool(__import__("shutil").which("codex")) or (H/".codex").is_dir(),
+}
+accounts = json.loads(subprocess.check_output([sys.executable, "scripts/detect-accounts.py"]))["accounts"]
+json.dump({
+  "harnesses": harnesses,
+  "adopt_from": [h for h,on in harnesses.items() if on],
+  "accounts": accounts,
+  "litellm": True,
+  "claude_in_opencode": False,
+}, open("config.json","w"), indent=2)
+print(f"→ bootstrapped config.json for this machine ({sum(harnesses.values())} harnesses, {len(accounts)} accounts)")
+PY
+  fi
+  echo "Using config.json (non-interactive)."
 else
   echo "== agent-home setup =="
   echo "Store (content lives here): $STORE"
@@ -113,7 +136,25 @@ else
     printf '%s\n' "${TARGETS[@]}" | grep -qx "$h" && continue
     ask "  set up ${LABEL[$h]}?" "$(detected "$h" && echo y || echo n)" && TARGETS+=("$h"); done
   echo
-  echo "Step 3/3 — options"
+  echo "Step 3/4 — accounts (each becomes a login you can switch to in any harness)"
+  # spec line = name|provider|config_dir|keychain|env_key|token_dir|base_url
+  ACCT_SPECS=()
+  # Auto-detect Claude accounts from their config dirs.
+  [ -d "$HOME/.claude" ] && ask "  add Claude account 'claude-personal' (~/.claude)?" y \
+    && ACCT_SPECS+=("claude-personal|anthropic-sub|~/.claude|Claude Code-credentials|||")
+  [ -d "$HOME/.claude-work" ] && ask "  add Claude account 'claude-work' (~/.claude-work)?" y \
+    && ACCT_SPECS+=("claude-work|anthropic-sub|~/.claude-work||||")
+  while ask "  add another Claude account?" n; do
+    read -r -p "      name (e.g. claude-side): " nm </dev/tty
+    read -r -p "      its CLAUDE_CONFIG_DIR (e.g. ~/.claude-side): " cd </dev/tty
+    [ -n "$nm" ] && [ -n "$cd" ] && ACCT_SPECS+=("$nm|anthropic-sub|$cd||||")
+  done
+  ask "  add a ChatGPT / Codex subscription account?" y \
+    && ACCT_SPECS+=("chatgpt-personal|chatgpt-sub|||~/.agent-home/auth/chatgpt-personal|")
+  ask "  add OpenRouter (OpenAI-compatible API key)?" n \
+    && ACCT_SPECS+=("openrouter|openai-key||||OPENROUTER_API_KEY|https://openrouter.ai/api/v1")
+  echo
+  echo "Step 4/4 — options"
   LITELLM=false; ask "  set up LiteLLM proxy (ChatGPT sub + OpenRouter + local on :4000)?" y && LITELLM=true
   CIO=false
   if printf '%s\n' "${TARGETS[@]}" | grep -qx opencode; then
@@ -121,21 +162,37 @@ else
     echo "    (subscription OAuth is for official clients; bans enforced since 2026)."
     ask "  enable Claude-in-opencode anyway?" n && CIO=true
   fi
-  python3 - "$LITELLM" "$CIO" "${SOURCES[*]}" "${TARGETS[*]}" <<'PY'
+  printf '%s\n' "${ACCT_SPECS[@]}" | python3 - "$LITELLM" "$CIO" "${SOURCES[*]}" "${TARGETS[*]}" <<'PY'
 import json, sys, os
 litellm, cio, sources, targets = sys.argv[1]=="true", sys.argv[2]=="true", sys.argv[3].split(), sys.argv[4].split()
 known = ["claude-code","claude-code-work","opencode","codex"]
+accounts = []
+for line in sys.stdin.read().splitlines():
+    if not line.strip():
+        continue
+    name, prov, cdir, keychain, envkey, tokendir, baseurl = (line.split("|") + [""]*7)[:7]
+    a = {"name": name, "provider": prov}
+    if prov == "anthropic-sub":
+        a["config_dir"] = cdir; a["keychain"] = keychain or None
+    elif prov == "chatgpt-sub":
+        a["token_dir"] = tokendir; a["port"] = 4001
+    elif prov == "openai-key":
+        a["env_key"] = envkey; a["base_url"] = baseurl
+    accounts.append(a)
 cfg = {}
 if os.path.exists("config.json"):
     try: cfg = json.load(open("config.json"))
     except Exception: cfg = {}
 cfg["harnesses"] = {h: (h in targets) for h in known}
 cfg["adopt_from"] = sources
+if not accounts:  # user skipped all prompts → auto-detect this machine's Claude accounts
+    import subprocess
+    accounts = json.loads(subprocess.check_output([sys.executable, "scripts/detect-accounts.py"]))["accounts"]
+cfg["accounts"] = accounts
 cfg["litellm"] = litellm
 cfg["claude_in_opencode"] = cio
-cfg.setdefault("accounts", json.load(open("config.example.json"))["accounts"])
 json.dump(cfg, open("config.json","w"), indent=2)
-print("\n→ wrote config.json (edit 'accounts' to add/remove logins)")
+print(f"\n→ wrote config.json ({len(cfg['accounts'])} accounts; edit anytime)")
 PY
 fi
 
