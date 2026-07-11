@@ -6,62 +6,71 @@ memory — plus a wiring layer so your **paid memberships** (Claude Max, ChatGPT
 work in whichever harness you open. Switch harnesses and nothing changes except
 the harness: same skills, same memory, same models, no extra cost.
 
+## This repo holds only code
+
+Your actual content — skills, memory, instructions — lives in the **`~/.agent-home`
+dot-folder** (like `~/.claude`), not here. This repo is just the machinery that
+builds the unified system and links `~/.agent-home` into each harness. Nothing
+personal is ever committed here, so it's safe to share as-is.
+
+```
+install.sh     interactive setup — asks which harnesses you use / want set up
+sync.py        idempotent linker (~/.agent-home → harnesses); --adopt, --status
+litellm/       LiteLLM proxy config (ChatGPT sub + OpenRouter + local)
+templates/     per-harness config templates + AGENTS.example.md starter
+scripts/       verify-claude-membership.sh (proves membership, not API credits)
+config.json    per-user, gitignored (written by install.sh)
+
+~/.agent-home/  ← YOUR content (not in this repo)
+  AGENTS.md     global instructions (becomes CLAUDE.md/AGENTS.md everywhere)
+  skills/ agents/ commands/ memory/
+```
+
 ## Quick start (new machine / teammate)
 
 ```bash
 git clone <this-repo> ~/Documents/python/agent-home
 cd ~/Documents/python/agent-home
-cp config.example.json config.json      # edit: which harnesses, opt-ins
-./install.sh                            # symlinks + provider configs (idempotent)
-# then the interactive logins it prints:
+./install.sh                            # interactive: pick harnesses to import from / set up
+# then the logins it prints:
 codex login                             # ChatGPT account → Codex CLI (sanctioned)
 litellm --config litellm/config.yaml    # complete the device-code URL once
 ./scripts/verify-claude-membership.sh   # proves Claude runs on membership, not credits
 ```
 
-`config.json` is per-user and gitignored; everything else is committed and shared.
-
-## Layout
-
-```
-canonical/
-  AGENTS.md    global instructions (single source; becomes CLAUDE.md everywhere)
-  skills/      Agent Skills (SKILL.md format — the open standard all harnesses read)
-  agents/      subagent definitions
-  commands/    slash commands
-  memory/      long-term memory (one file per fact + MEMORY.md index)
-  mcp/         (reserved) canonical MCP server definitions
-sync.py        idempotent linker; --adopt for first-time import, --status to inspect
-```
+`install.sh` asks two things: which harnesses you **currently use** (it imports
+their existing skills/memory/instructions into `~/.agent-home`) and which to
+**set up** (it links the store into them). Re-runnable anytime; `--yes` reuses
+your saved `config.json`, `--status` just inspects.
 
 ## What reads what
 
 | Harness | Instructions | Skills | Memory |
 |---|---|---|---|
-| Claude Code (personal) | `~/.claude/CLAUDE.md` → `canonical/AGENTS.md` | `~/.claude/skills` → `canonical/skills` | `~/.claude/auto-memory` → `canonical/memory` (native auto-load) |
-| Claude Code (work) | `~/.claude-work/CLAUDE.md` → `canonical/AGENTS.md` | shares `~/.claude/skills` | via AGENTS.md instruction |
-| opencode | `~/.config/opencode/AGENTS.md` → `canonical/AGENTS.md` (also reads `~/.claude/CLAUDE.md` natively) | `~/.claude/skills` + `~/.agents/skills` (native) | via AGENTS.md instruction |
-| Codex CLI | `~/.codex/AGENTS.md` → `canonical/AGENTS.md` | `~/.agents/skills` (native) | via AGENTS.md instruction |
-| anything else | point it at `canonical/AGENTS.md` | `~/.agents/skills` is the emerging default | via AGENTS.md instruction |
+| Claude Code (personal) | `~/.claude/CLAUDE.md` → `~/.agent-home/AGENTS.md` | `~/.claude/skills` → `~/.agent-home/skills` | `~/.claude/auto-memory` → `~/.agent-home/memory` (native auto-load) |
+| Claude Code (work) | `~/.claude-work/CLAUDE.md` → `~/.agent-home/AGENTS.md` | shares `~/.claude/skills` | via AGENTS.md instruction |
+| opencode | `~/.config/opencode/AGENTS.md` → `~/.agent-home/AGENTS.md` (also reads `~/.claude/CLAUDE.md` natively) | `~/.claude/skills` + `~/.agents/skills` (native) | via AGENTS.md instruction |
+| Codex CLI | `~/.codex/AGENTS.md` → `~/.agent-home/AGENTS.md` | `~/.agents/skills` (native) | via AGENTS.md instruction |
+| anything else | point it at `~/.agent-home/AGENTS.md` | `~/.agents/skills` is the emerging default | via AGENTS.md instruction |
 
-`~/.agents/skills` is *generated* by `sync.py`: per-skill symlinks for every canonical
+`~/.agents/skills` is *generated* by `sync.py`: per-skill symlinks for every store
 skill plus every **enabled Claude Code plugin's** skills (95 at last run). Claude Code
 plugins themselves (hooks, MCP, marketplaces) are architecturally Claude-specific and
 cannot port; their skills are the portable part, and this is how they travel.
 
-The memory bridge is an instruction block at the bottom of `canonical/AGENTS.md`:
-harnesses without native memory are told to read `~/.claude/auto-memory/MEMORY.md`
-at session start and to write new facts in the same format. Claude Code loads it
+The memory bridge is an instruction block in `~/.agent-home/AGENTS.md`: harnesses
+without native memory are told to read `~/.claude/auto-memory/MEMORY.md` at
+session start and write new facts in the same format. Claude Code loads it
 natively (`autoMemoryDirectory` in settings.json).
 
 ## Routine
 
-- New skill/memory/instruction edits happen anywhere → they're already in the repo
-  (everything is a symlink into it). `git commit` here to snapshot; push to a
-  **private** remote if you want it off-machine (memory contains private notes).
+- Edit a skill/memory/instruction in any harness → it's already in `~/.agent-home`
+  (everything symlinks there). To back up or sync YOUR content across YOUR
+  machines, `git init` a **private** repo inside `~/.agent-home` and push it.
 - After installing/enabling a Claude Code plugin: run `./sync.py` to refresh
   `~/.agents/skills`.
-- New machine: clone, run `./sync.py --adopt`, done.
+- New machine: clone this repo, `./install.sh`, done.
 
 ## Memberships (model access)
 

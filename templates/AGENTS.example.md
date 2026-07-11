@@ -1,8 +1,8 @@
 # Global agent instructions (starter)
 
 This file becomes `CLAUDE.md` / `AGENTS.md` in every harness via `sync.py`.
-Replace with your own. `install.sh` copies it to `canonical/AGENTS.md` (which is
-gitignored) if you don't have one yet.
+Replace with your own. `install.sh` copies it to `~/.agent-home/AGENTS.md` if you
+don't have one yet.
 
 ## Persistent memory (all harnesses)
 - Long-term memory lives at `~/.claude/auto-memory/` (one markdown file per fact,

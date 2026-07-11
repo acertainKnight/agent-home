@@ -1,6 +1,7 @@
 {
-  "_comment": "Copy to config.json (gitignored) and edit. install.sh reads this.",
+  "_comment": "Written by ./install.sh (interactive). Or copy to config.json and edit. Gitignored — per-user.",
 
+  "_harnesses": "Targets: link the unified store into these harnesses.",
   "harnesses": {
     "claude-code": true,
     "claude-code-work": false,
@@ -8,8 +9,11 @@
     "codex": true
   },
 
+  "_adopt_from": "Sources: pull existing skills/memory/instructions FROM these into the store (subset of targets). Usually just your current primary.",
+  "adopt_from": ["claude-code"],
+
   "litellm": true,
 
-  "_claude_in_opencode": "OPT-IN, BAN RISK. Reuses your Claude subscription OAuth token inside opencode via the opencode-claude-auth plugin. Anthropic's ToS restricts subscription tokens to official clients and has enforced with account bans since Jan 2026. false = leave Claude to Claude Code only (recommended for shared/team use).",
+  "_claude_in_opencode": "OPT-IN, BAN RISK. Reuse your Claude subscription OAuth inside opencode via opencode-claude-auth. Anthropic restricts subscription tokens to official clients (bans since Jan 2026). false = Claude stays in Claude Code only (recommended for team use).",
   "claude_in_opencode": false
 }

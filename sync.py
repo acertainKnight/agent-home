@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""agent-home: one canonical store for skills/agents/commands/memory/instructions,
-symlinked or generated into every installed coding harness.
+"""agent-home: link the unified store (~/.agent-home) — skills, agents, commands,
+memory, AGENTS.md — into every coding harness. This repo holds only the code;
+your content lives in the ~/.agent-home dot-folder (override with $AGENT_HOME).
 
 Usage:
   ./sync.py            apply mappings (idempotent)
-  ./sync.py --adopt    first run: move existing harness files INTO canonical/, then link
+  ./sync.py --adopt    move existing harness files INTO ~/.agent-home, then link
   ./sync.py --status   show state of every mapping
 """
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
-CANON = REPO / "canonical"
 HOME = Path.home()
+CANON = Path(os.environ.get("AGENT_HOME", HOME / ".agent-home"))
 
 # Per-harness link maps. `install.sh` writes config.json to pick which apply;
 # absent config = all of them (backwards compatible). Uses $HOME so it's
@@ -47,22 +49,33 @@ HARNESSES = {
 
 def load_config():
     try:
-        cfg = json.load(open(REPO / "config.json"))
+        return json.load(open(REPO / "config.json"))
     except (OSError, json.JSONDecodeError):
-        return {name: True for name in HARNESSES}
-    return cfg.get("harnesses", {name: True for name in HARNESSES})
+        return {}
 
 
-def symlinks():
-    enabled = load_config()
+def links_for(names):
     out = []
-    for name, links in HARNESSES.items():
-        if enabled.get(name):
-            out += links
+    for name in names:
+        out += HARNESSES.get(name, [])
     return out
 
 
-SYMLINKS = symlinks()
+def target_names():
+    """Harnesses to link the store into."""
+    cfg = load_config().get("harnesses")
+    if not cfg:
+        return list(HARNESSES)
+    return [n for n, on in cfg.items() if on]
+
+
+def source_names():
+    """Harnesses whose existing config we adopt INTO the store (subset of targets)."""
+    return load_config().get("adopt_from", target_names())
+
+
+# Everything the store links into. `status` and `apply` operate over targets.
+SYMLINKS = links_for(target_names())
 
 AGENTS_SKILLS = HOME / ".agents/skills"  # universal skill dir (Codex, opencode, spec default)
 
@@ -117,8 +130,9 @@ def status():
 
 
 def adopt():
-    """Move real files/dirs into canonical/, leaving symlinks behind."""
-    for src, dst in SYMLINKS:
+    """Move real files/dirs from SOURCE harnesses into ~/.agent-home, link back."""
+    CANON.mkdir(parents=True, exist_ok=True)
+    for src, dst in links_for(source_names()):
         if dst.is_symlink() or not dst.exists():
             continue
         if src.is_dir() and not any(src.iterdir()):
