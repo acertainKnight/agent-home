@@ -31,17 +31,27 @@ config.json    per-user, gitignored (written by install.sh)
 ```bash
 git clone <this-repo> ~/Documents/python/agent-home
 cd ~/Documents/python/agent-home
-./install.sh                            # interactive: pick harnesses to import from / set up
-# then the logins it prints:
-codex login                             # ChatGPT account → Codex CLI (sanctioned)
-litellm --config litellm/config.yaml    # complete the device-code URL once
-./scripts/verify-claude-membership.sh   # proves Claude runs on membership, not credits
+make install     # (or: just install)  — the whole guided walkthrough
 ```
 
-`install.sh` asks two things: which harnesses you **currently use** (it imports
-their existing skills/memory/instructions/commands into `~/.agent-home`) and
-which to **set up** (it links the store into them). Re-runnable anytime; `--yes`
-reuses your saved `config.json`, `--status` just inspects.
+`make install` runs one interactive walkthrough that: picks which harnesses you
+**currently use** (merges their existing skills/memory/instructions/commands into
+`~/.agent-home`) and which to **set up** (links the store into them), wires the
+model providers, then **logs in and verifies every account** in `config.json`.
+
+Other targets (`make help` lists them):
+
+| command | does |
+|---|---|
+| `make install` | full walkthrough (merge + wire + logins) |
+| `make login` | log in & verify every account (re-runnable) |
+| `make status` | show every symlink's state |
+| `make verify ACCOUNT=work` | prove one account runs on membership, not credits |
+| `make sync` | re-merge after adding a skill/plugin |
+| `make litellm` | start the LiteLLM router (:4000) |
+
+No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
+`--yes` are the sub-modes.
 
 ### Full merge — nothing is left behind
 

@@ -2,22 +2,14 @@
 # Default auth: `codex login` once (ChatGPT account, plan-based usage, no API credits).
 forced_login_method = "chatgpt"
 
-# Extra backends: switch with `codex --profile <name>`.
+# Extra backends reached through LiteLLM (:4000) — ChatGPT-sub models, OpenRouter,
+# and local models all appear here. Codex requires wire_api = "responses"
+# (the older "chat" wire is no longer supported), which LiteLLM speaks.
 [model_providers.litellm]
-name = "LiteLLM (local router)"
+name = "LiteLLM (router: ChatGPT sub + OpenRouter + local)"
 base_url = "http://localhost:4000/v1"
 wire_api = "responses"
-
-[model_providers.openrouter]
-name = "OpenRouter"
-base_url = "https://openrouter.ai/api/v1"
-env_key = "OPENROUTER_API_KEY"
-wire_api = "chat"
 
 [profiles.litellm]
 model_provider = "litellm"
 model = "chatgpt/gpt-5.3-codex"
-
-[profiles.openrouter]
-model_provider = "openrouter"
-model = "anthropic/claude-sonnet-5"
