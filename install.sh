@@ -252,6 +252,43 @@ echo "== 5. MCP servers (plugins → portable) =="
 python3 scripts/port-mcp.py adopt
 python3 scripts/port-mcp.py apply
 
+echo "== 6. Seamless-switching extras =="
+# Starter store content — only created if absent (store content is the user's).
+[ -f "$STORE/commands/handoff.md" ] || { cp templates/commands/handoff.md "$STORE/commands/handoff.md"; echo "  + /handoff command (session handoff, works in every harness)"; }
+[ -f "$STORE/models.json" ] || { cp templates/models.example.json "$STORE/models.json"; echo "  + models.json (edit to map model aliases per harness)"; }
+[ -f "$STORE/env" ] || { cp templates/env.example "$STORE/env"; chmod 600 "$STORE/env"; echo "  + env (shared secrets/env for MCPs — add keys there)"; }
+# AGENTS.md bridge blocks (handoff/models/history) — idempotent append.
+python3 - <<'PY'
+import os, re
+path = os.path.join(os.path.dirname(os.environ["AGENT_HOME_CONFIG"]), "AGENTS.md")
+tmpl = open("templates/AGENTS.example.md").read()
+have = open(path).read() if os.path.exists(path) else ""
+for m in re.finditer(r"^## .+?(?=^## |\Z)", tmpl, re.M | re.S):
+    block = m.group(0)
+    header = block.splitlines()[0]
+    if header not in have:
+        have = have.rstrip() + "\n\n" + block.strip() + "\n"
+        print(f"  + AGENTS.md: appended '{header}'")
+open(path, "w").write(have)
+PY
+# Shared env → every shell (so MCP secrets resolve in every harness).
+ZLINE='[ -f "$HOME/.agent-home/env" ] && { set -a; . "$HOME/.agent-home/env"; set +a; }  # agent-home shared env'
+if ! grep -qs 'agent-home shared env' "$HOME/.zshenv" 2>/dev/null; then
+  if [ "$NONINTERACTIVE" = true ]; then
+    echo "  · to share env across harnesses, add to ~/.zshenv:  $ZLINE"
+  elif ask "  source $STORE/env from ~/.zshenv (every harness sees the same secrets)?" y; then
+    printf '%s\n' "$ZLINE" >> "$HOME/.zshenv"; echo "  + ~/.zshenv sources the shared env"
+  fi
+fi
+# opencode gets translated copies of your Claude subagents.
+[ "$(has_target opencode)" = "True" ] && python3 scripts/port-agents.py
+# Cross-harness history index (incremental; makes past sessions searchable everywhere).
+python3 scripts/history.py || echo "  ! history indexing failed (non-fatal)"
+# Auto-resync watcher (macOS launchd) — optional.
+if [ "$NONINTERACTIVE" = false ] && [ "$(uname)" = "Darwin" ] && [ ! -f "$HOME/Library/LaunchAgents/com.agent-home.sync.plist" ]; then
+  ask "  install auto-resync watcher (re-runs sync when plugins/skills change)?" n && ./scripts/install-watcher.sh
+fi
+
 echo
 if [ "$NONINTERACTIVE" = true ]; then
   echo "Merged + wired. Log in accounts with:  make login   (or ./install.sh --login)"

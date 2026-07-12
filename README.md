@@ -17,14 +17,19 @@ personal is ever committed here, so it's safe to share as-is.
 install.sh     interactive setup — asks which harnesses you use / want set up
 sync.py        idempotent linker (~/.agent-home → harnesses); --adopt, --status
 litellm/       LiteLLM proxy config (ChatGPT sub + OpenRouter + local)
-templates/     per-harness config templates + AGENTS.example.md starter
-scripts/       verify-claude-membership.sh, claude-token.sh, port-mcp.py, …
+templates/     per-harness config templates, AGENTS.example.md, /handoff command
+scripts/       claude-token.sh, verify/quota, port-mcp.py, port-agents.py,
+               doctor.sh, history.py, install-watcher.sh
 config.example.json   template only (never used as defaults)
 
 ~/.agent-home/  ← EVERYTHING per-user (not in this repo)
   config.json   your harness + account choices (written by install.sh)
   AGENTS.md     global instructions (becomes CLAUDE.md/AGENTS.md everywhere)
   mcp.json      canonical MCP servers (distributed to each harness)
+  models.json   model-alias map (opus/sonnet/… → each harness's model id)
+  env           shared secrets/env (sourced by every shell; chmod 600)
+  handoff.md    cross-harness session handoff (written by /handoff)
+  history/      indexed transcripts from every harness (searchable)
   skills/ agents/ commands/ memory/ workflows/
 ```
 
@@ -47,9 +52,14 @@ Other targets (`make help` lists them):
 |---|---|
 | `make install` | full walkthrough (merge + wire + logins) |
 | `make login` | log in & verify every account (re-runnable) |
+| `make doctor` | health-check everything; prints the exact fix per problem |
 | `make status` | show every symlink's state |
 | `make verify ACCOUNT=work` | prove one account runs on membership, not credits |
+| `make quota` | each Claude account's membership rate-limit pools |
 | `make sync` | re-merge after adding a skill/plugin |
+| `make history` / `make history q="regex"` | index / search past sessions from every harness |
+| `make agents` | regenerate opencode agents from your Claude subagents |
+| `make watcher` | auto-run sync when plugins/skills change (launchd) |
 | `make litellm` | start the LiteLLM router (:4000) |
 
 No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
@@ -64,7 +74,10 @@ No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
 | **Skills** | ✅ every harness | store + enabled-plugin skills → `~/.agents/skills` |
 | **Commands / prompts** | ✅ every harness | Claude + opencode + Codex command dirs unified |
 | **MCP servers** | ✅ opencode + Codex | pulled from Claude (user + plugins) into `~/.agent-home/mcp.json`, distributed to each harness's native format. stdio ports cleanly; remote ports too (Codex needs `experimental_use_rmcp_client`); Claude-managed-OAuth servers port the definition but you re-auth in the target harness |
-| **Agents** (subagents) | ✅ across Claude profiles | Claude-format; opencode/Codex have their own agent model (semantic re-author, not mechanical) |
+| **Agents** (subagents) | ✅ Claude + opencode | Claude-format is canonical; `port-agents.py` mechanically translates to opencode's agent format (description/tools/model via `models.json` aliases). Codex has no subagent model |
+| **Session state** (handoff) | ✅ every harness | `/handoff` writes `~/.agent-home/handoff.md`; every harness reads it at session start |
+| **Session history** | ✅ every harness | `history.py` indexes Claude/Codex/opencode transcripts into `~/.agent-home/history/`, searchable from any agent |
+| **Secrets / env** | ✅ every harness | `~/.agent-home/env` sourced by every shell via one `~/.zshenv` line |
 | **Workflows** | ✅ across Claude profiles | Claude-Code-specific (the Workflow tool) |
 | **Plugins** | ✅ decomposed | a plugin = skills + commands + **MCP servers** + hooks + subagents. The first three now port to every harness (see their rows). What doesn't: the plugin *runtime* (marketplaces, its hooks — Claude-specific event JSON, machine-local install cache). So you get a plugin's tools and skills in opencode/Codex, just not its Claude-only hook wiring. |
 | **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain); opencode hooks are TS functions, Codex hooks a different shape — semantic re-author, not sync |
@@ -114,8 +127,11 @@ natively (`autoMemoryDirectory` in settings.json).
 - Edit a skill/memory/instruction in any harness → it's already in `~/.agent-home`
   (everything symlinks there). To back up or sync YOUR content across YOUR
   machines, `git init` a **private** repo inside `~/.agent-home` and push it.
+- Leaving mid-task? `/handoff` (any harness) → next session in ANY harness picks
+  it up. Wondering what a past session decided? `make history q="..."`.
 - After installing/enabling a Claude Code plugin: run `./sync.py` to refresh
-  `~/.agents/skills`.
+  `~/.agents/skills` — or `make watcher` once and it happens automatically.
+- Something feels off? `make doctor` names the problem and the fix.
 - New machine: clone this repo, `./install.sh`, done.
 
 ## Memberships (model access)

@@ -33,3 +33,27 @@ test:
 # start the LiteLLM router (:4000) — device-code login on first use
 litellm:
     litellm --config litellm/config.yaml
+
+# health-check everything: links, tokens, MCP freshness, env wiring
+doctor:
+    ./scripts/doctor.sh
+
+# show each Claude account's membership rate-limit pools
+quota:
+    ./scripts/quota.sh
+
+# index all harness transcripts into ~/.agent-home/history
+history:
+    python3 scripts/history.py
+
+# search the indexed cross-harness history
+search q:
+    python3 scripts/history.py search "{{q}}"
+
+# regenerate opencode agents from ~/.agent-home/agents
+agents:
+    python3 scripts/port-agents.py
+
+# install the auto-resync watcher (launchd; re-runs sync on changes)
+watcher:
+    ./scripts/install-watcher.sh

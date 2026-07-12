@@ -1,0 +1,9 @@
+{
+  "_": "Model aliases: one friendly name -> what each harness calls that model. Copied to ~/.agent-home/models.json on install (edit that copy). Consumed by scripts/port-agents.py to map agent `model:` fields, and readable by any agent (AGENTS.md points here) when you name a model by alias.",
+  "aliases": {
+    "opus":   { "claude-code": "opus",   "opencode": "anthropic/claude-opus-4-8" },
+    "sonnet": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5" },
+    "haiku":  { "claude-code": "haiku",  "opencode": "anthropic/claude-haiku-4-5" },
+    "gpt":    { "opencode": "litellm/chatgpt-codex", "codex": "gpt-5-codex" }
+  }
+}

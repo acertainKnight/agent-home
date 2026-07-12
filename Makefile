@@ -1,6 +1,6 @@
 # agent-home — `make install` runs the full guided setup walkthrough.
 ACCOUNT ?= personal
-.PHONY: help install login sync status verify test litellm
+.PHONY: help install login sync status verify test litellm mcp doctor quota history agents watcher
 .DEFAULT_GOAL := help
 
 help:  ## show this help
@@ -29,3 +29,18 @@ test:  ## run the merge-engine self-check
 
 litellm:  ## start the LiteLLM router (:4000) — device-code login on first use
 	@litellm --config litellm/config.yaml
+
+doctor:  ## health-check everything: links, tokens, MCP freshness, env wiring
+	@./scripts/doctor.sh
+
+quota:  ## show each Claude account's membership rate-limit pools
+	@./scripts/quota.sh
+
+history:  ## index all harness transcripts; search with q="regex"
+	@python3 scripts/history.py $(if $(q),search "$(q)",index)
+
+agents:  ## regenerate opencode agents from ~/.agent-home/agents
+	@python3 scripts/port-agents.py
+
+watcher:  ## install the auto-resync watcher (launchd; re-runs sync on changes)
+	@./scripts/install-watcher.sh
