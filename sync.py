@@ -30,10 +30,12 @@ HARNESSES = {
         (CANON / "agents", HOME / ".claude/agents"),
         (CANON / "commands", HOME / ".claude/commands"),
         (CANON / "memory", HOME / ".claude/auto-memory"),
+        (CANON / "workflows", HOME / ".claude/workflows"),
         (CANON / "AGENTS.md", HOME / ".claude/CLAUDE.md"),
     ],
     # Second Claude Code profile (e.g. work). Shares ~/.claude/skills already.
     "claude-code-work": [
+        (CANON / "workflows", HOME / ".claude-work/workflows"),
         (CANON / "AGENTS.md", HOME / ".claude-work/CLAUDE.md"),
     ],
     # opencode: reads ~/.config/opencode/AGENTS.md, its own command/ dir, and

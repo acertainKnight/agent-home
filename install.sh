@@ -218,7 +218,7 @@ fi
 echo
 echo "== 1. Unified store → harnesses (merge + symlink) =="
 [ -f "$STORE/AGENTS.md" ] || { mkdir -p "$STORE"; cp templates/AGENTS.example.md "$STORE/AGENTS.md"; }
-mkdir -p "$STORE"/{skills,agents,commands,memory}
+mkdir -p "$STORE"/{skills,agents,commands,memory,workflows}
 python3 sync.py --adopt
 
 if [ "$(cfg litellm False)" = "True" ]; then
@@ -238,11 +238,8 @@ fi
 
 if [ "$(has_target opencode)" = "True" ]; then
   echo "== 4. opencode =="
-  DST="$HOME/.config/opencode/opencode.jsonc"; mkdir -p "$(dirname "$DST")"
-  { echo '{'; echo '  "$schema": "https://opencode.ai/config.json",'
-    [ "$(cfg claude_in_opencode False)" = "True" ] && echo '  "plugin": ["opencode-claude-auth@latest"],'
-    cat templates/opencode.provider.jsonc; echo '}'; } > "$DST"
-  echo "  wrote $DST"
+  # Non-breaking: merges our provider (+ optional plugin) into any existing config.
+  python3 scripts/wire-opencode.py "$(cfg claude_in_opencode False | tr '[:upper:]' '[:lower:]')"
 fi
 
 echo

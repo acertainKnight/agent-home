@@ -53,6 +53,27 @@ Other targets (`make help` lists them):
 No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
 `--yes` are the sub-modes.
 
+### What travels, and what can't
+
+| Thing | Shared via agent-home? | Notes |
+|---|---|---|
+| **Instructions** (CLAUDE.md/AGENTS.md) | ✅ every harness | merged, one source |
+| **Memory** (auto-memory) | ✅ | native in Claude Code; AGENTS.md bridge elsewhere |
+| **Skills** | ✅ every harness | store + enabled-plugin skills → `~/.agents/skills` |
+| **Commands / prompts** | ✅ every harness | Claude + opencode + Codex command dirs unified |
+| **Agents** (subagents) | ✅ across Claude profiles | Claude-format; other harnesses may not read them |
+| **Workflows** | ✅ across Claude profiles | Claude-Code-specific (the Workflow tool) |
+| **Plugins** | ⚠️ partial | their **skills** port everywhere; the plugins themselves (marketplaces, hooks, MCP) are Claude-specific and their install cache is machine-local, so they don't port to other harnesses or across machines. Across your Claude *profiles* they're shareable (work → personal). |
+| **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain) — syncing them would break other machines |
+
+### Non-breaking
+
+Re-running is safe on an already-set-up machine: content dirs are **merged**, not
+replaced (union; a same-named-but-different file is kept as `name.from-<harness>`,
+never overwritten), logins/credentials are never touched, `~/.codex/config.toml`
+is only written if absent, and `opencode.jsonc` is **merged** into (your other
+providers/settings/keys are preserved; an unparseable file is backed up first).
+
 ### Full merge — nothing is left behind
 
 `--adopt` doesn't just copy Claude Code's config; it **unions every source
