@@ -17,12 +17,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ACCOUNT="${1:-personal}"
+export AGENT_HOME_CONFIG="${AGENT_HOME:-$HOME/.agent-home}/config.json"
 
 IFS=$'\t' read -r CONFIG_DIR KEYCHAIN < <(python3 - "$ACCOUNT" <<'PY'
 import json, sys, os
 acct = sys.argv[1]
 try:
-    cfg = json.load(open("config.json"))
+    cfg = json.load(open(os.environ["AGENT_HOME_CONFIG"]))
 except OSError:
     cfg = {}
 accts = cfg.get("accounts", cfg.get("claude_accounts", []))

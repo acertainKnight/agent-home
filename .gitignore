@@ -1,7 +1,6 @@
-# Per-user config (written by install.sh)
-config.json
+# This repo is setup code only. Everything per-user lives in ~/.agent-home:
+#   ~/.agent-home/config.json   (your harness/account choices)
+#   ~/.agent-home/{skills,agents,commands,memory,workflows}, mcp.json, AGENTS.md
+# Nothing personal is ever committed here.
 venv/
 __pycache__/
-
-# The unified content store is ~/.agent-home (NOT in this repo). This repo holds
-# only the setup code. Nothing personal is ever committed here.

@@ -18,12 +18,14 @@ install.sh     interactive setup — asks which harnesses you use / want set up
 sync.py        idempotent linker (~/.agent-home → harnesses); --adopt, --status
 litellm/       LiteLLM proxy config (ChatGPT sub + OpenRouter + local)
 templates/     per-harness config templates + AGENTS.example.md starter
-scripts/       verify-claude-membership.sh (proves membership, not API credits)
-config.json    per-user, gitignored (written by install.sh)
+scripts/       verify-claude-membership.sh, claude-token.sh, port-mcp.py, …
+config.example.json   template only (never used as defaults)
 
-~/.agent-home/  ← YOUR content (not in this repo)
+~/.agent-home/  ← EVERYTHING per-user (not in this repo)
+  config.json   your harness + account choices (written by install.sh)
   AGENTS.md     global instructions (becomes CLAUDE.md/AGENTS.md everywhere)
-  skills/ agents/ commands/ memory/
+  mcp.json      canonical MCP servers (distributed to each harness)
+  skills/ agents/ commands/ memory/ workflows/
 ```
 
 ## Quick start (new machine / teammate)

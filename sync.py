@@ -75,7 +75,7 @@ SKILL_SWEEP = [HOME / ".config/opencode/skills", HOME / ".codex/skills"]
 
 def load_config():
     try:
-        return json.load(open(REPO / "config.json"))
+        return json.load(open(CANON / "config.json"))
     except (OSError, json.JSONDecodeError):
         return {}
 

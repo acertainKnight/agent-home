@@ -11,6 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO="$PWD"
 STORE="${AGENT_HOME:-$HOME/.agent-home}"
+CONFIG="$STORE/config.json"          # per-user config lives IN the store, not the repo
+export AGENT_HOME_CONFIG="$CONFIG"   # read by the inline python blocks below
 
 KNOWN=(claude-code claude-code-work opencode codex)
 declare -A LABEL=(
@@ -31,11 +33,11 @@ ask() { # ask "question" default(y/n); reads the terminal even inside pipes
   read -r -p "$q [$([ "$def" = y ] && echo 'Y/n' || echo 'y/N')] " ans </dev/tty 2>/dev/null || ans=$def
   ans=${ans:-$def}; [[ $ans =~ ^[Yy] ]]; }
 
-cfg() { python3 -c "import json;print(json.load(open('config.json')).get('$1',$2))"; }
-has_target() { python3 -c "import json;print('$1' in [k for k,v in json.load(open('config.json'))['harnesses'].items() if v])"; }
+cfg() { python3 -c "import json,os;print(json.load(open(os.environ['AGENT_HOME_CONFIG'])).get('$1',$2))"; }
+has_target() { python3 -c "import json,os;print('$1' in [k for k,v in json.load(open(os.environ['AGENT_HOME_CONFIG']))['harnesses'].items() if v])"; }
 accounts_tsv() { python3 -c '
 import json, os
-try: c = json.load(open("config.json"))
+try: c = json.load(open(os.environ["AGENT_HOME_CONFIG"]))
 except OSError: c = {}
 # "|" delimiter (not IFS-whitespace) so empty fields survive read.
 # dir = the accounts config dir: CLAUDE_CONFIG_DIR (claude) or CODEX_HOME (codex).
@@ -97,7 +99,8 @@ esac
 NONINTERACTIVE=false
 if [ "${1:-}" = "--yes" ] || [ ! -t 0 ]; then
   NONINTERACTIVE=true
-  if [ ! -f config.json ]; then
+  if [ ! -f "$CONFIG" ]; then
+    mkdir -p "$STORE"
     # Bootstrap from THIS machine: detected harnesses + auto-detected Claude
     # accounts (never the checked-in example's accounts).
     python3 - <<'PY'
@@ -117,8 +120,8 @@ json.dump({
   "accounts": accounts,
   "litellm": True,
   "claude_in_opencode": False,
-}, open("config.json","w"), indent=2)
-print(f"→ bootstrapped config.json for this machine ({sum(harnesses.values())} harnesses, {len(accounts)} accounts)")
+}, open(os.environ["AGENT_HOME_CONFIG"],"w"), indent=2)
+print(f"→ bootstrapped {os.environ['AGENT_HOME_CONFIG']} ({sum(harnesses.values())} harnesses, {len(accounts)} accounts)")
 PY
   fi
   echo "Using config.json (non-interactive)."
@@ -199,8 +202,8 @@ for line in sys.stdin.read().splitlines():
 for i, a in enumerate(x for x in accounts if x["provider"] == "chatgpt-sub"):
     a["port"] = 4001 + i
 cfg = {}
-if os.path.exists("config.json"):
-    try: cfg = json.load(open("config.json"))
+if os.path.exists(os.environ["AGENT_HOME_CONFIG"]):
+    try: cfg = json.load(open(os.environ["AGENT_HOME_CONFIG"]))
     except Exception: cfg = {}
 cfg["harnesses"] = {h: (h in targets) for h in known}
 cfg["adopt_from"] = sources
@@ -210,8 +213,9 @@ if not accounts:  # user skipped all prompts → auto-detect this machine's Clau
 cfg["accounts"] = accounts
 cfg["litellm"] = litellm
 cfg["claude_in_opencode"] = cio
-json.dump(cfg, open("config.json","w"), indent=2)
-print(f"\n→ wrote config.json ({len(cfg['accounts'])} accounts; edit anytime)")
+os.makedirs(os.path.dirname(os.environ["AGENT_HOME_CONFIG"]), exist_ok=True)
+json.dump(cfg, open(os.environ["AGENT_HOME_CONFIG"],"w"), indent=2)
+print(f"\n→ wrote {os.environ['AGENT_HOME_CONFIG']} ({len(cfg['accounts'])} accounts; edit anytime)")
 PY
 fi
 
