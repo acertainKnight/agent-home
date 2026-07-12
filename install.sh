@@ -6,6 +6,7 @@
 #   ./install.sh            full interactive walkthrough (merge + wire + logins)
 #   ./install.sh --login    just the account login+verify walkthrough
 #   ./install.sh --status   show link state, change nothing
+#   ./install.sh --watcher  install/refresh the auto-resync watcher only
 #   ./install.sh --yes      non-interactive; reuse config.json, skip logins
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -91,8 +92,9 @@ login_walkthrough() {
 }
 
 case "${1:-}" in
-  --status) python3 sync.py --status; exit 0;;
-  --login)  login_walkthrough; exit 0;;
+  --status)  python3 sync.py --status; exit 0;;
+  --login)   login_walkthrough; exit 0;;
+  --watcher) ./scripts/install-watcher.sh; exit 0;;
 esac
 
 # ---- config: interactive unless --yes (or no TTY) ----

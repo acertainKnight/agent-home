@@ -63,7 +63,7 @@ Other targets (`make help` lists them):
 | `make litellm` | start the LiteLLM router (:4000) |
 
 No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
-`--yes` are the sub-modes.
+`--watcher`, `--yes` are the sub-modes.
 
 ### What travels, and what can't
 
