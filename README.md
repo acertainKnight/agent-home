@@ -61,10 +61,11 @@ No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
 | **Memory** (auto-memory) | ✅ | native in Claude Code; AGENTS.md bridge elsewhere |
 | **Skills** | ✅ every harness | store + enabled-plugin skills → `~/.agents/skills` |
 | **Commands / prompts** | ✅ every harness | Claude + opencode + Codex command dirs unified |
-| **Agents** (subagents) | ✅ across Claude profiles | Claude-format; other harnesses may not read them |
+| **MCP servers** | ✅ opencode + Codex | pulled from Claude (user + plugins) into `~/.agent-home/mcp.json`, distributed to each harness's native format. stdio ports cleanly; remote ports too (Codex needs `experimental_use_rmcp_client`); Claude-managed-OAuth servers port the definition but you re-auth in the target harness |
+| **Agents** (subagents) | ✅ across Claude profiles | Claude-format; opencode/Codex have their own agent model (semantic re-author, not mechanical) |
 | **Workflows** | ✅ across Claude profiles | Claude-Code-specific (the Workflow tool) |
-| **Plugins** | ⚠️ partial | their **skills** port everywhere; the plugins themselves (marketplaces, hooks, MCP) are Claude-specific and their install cache is machine-local, so they don't port to other harnesses or across machines. Across your Claude *profiles* they're shareable (work → personal). |
-| **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain) — syncing them would break other machines |
+| **Plugins** | ✅ decomposed | a plugin = skills + commands + **MCP servers** + hooks + subagents. The first three now port to every harness (see their rows). What doesn't: the plugin *runtime* (marketplaces, its hooks — Claude-specific event JSON, machine-local install cache). So you get a plugin's tools and skills in opencode/Codex, just not its Claude-only hook wiring. |
+| **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain); opencode hooks are TS functions, Codex hooks a different shape — semantic re-author, not sync |
 
 ### Non-breaking
 

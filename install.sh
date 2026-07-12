@@ -242,6 +242,12 @@ if [ "$(has_target opencode)" = "True" ]; then
   python3 scripts/wire-opencode.py "$(cfg claude_in_opencode False | tr '[:upper:]' '[:lower:]')"
 fi
 
+# 5. MCP servers — the portable core of "plugins". Pull every MCP Claude Code
+# knows (user + enabled plugins) into the store, then distribute to each harness.
+echo "== 5. MCP servers (plugins → portable) =="
+python3 scripts/port-mcp.py adopt
+python3 scripts/port-mcp.py apply
+
 echo
 if [ "$NONINTERACTIVE" = true ]; then
   echo "Merged + wired. Log in accounts with:  make login   (or ./install.sh --login)"

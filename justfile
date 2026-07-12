@@ -14,6 +14,10 @@ login:
 sync:
     python3 sync.py --adopt
 
+# pull all MCP servers into the store, distribute to opencode + codex
+mcp:
+    python3 scripts/port-mcp.py adopt && python3 scripts/port-mcp.py apply && python3 scripts/port-mcp.py list
+
 # show every symlink's state
 status:
     ./install.sh --status
