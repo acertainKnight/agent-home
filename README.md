@@ -55,7 +55,7 @@ Other targets (`make help` lists them):
 | `make doctor` | health-check everything; prints the exact fix per problem |
 | `make status` | show every symlink's state |
 | `make verify ACCOUNT=work` | prove one account runs on membership, not credits |
-| `make quota` | each Claude account's membership rate-limit pools |
+| `make quota` | every account's headroom: Claude 5h/7d pools, Codex 5h/weekly usage, OpenRouter credits |
 | `make sync` | re-merge after adding a skill/plugin |
 | `make history` / `make history q="regex"` | index / search past sessions from every harness |
 | `make agents` | regenerate opencode agents from your Claude subagents |

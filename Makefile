@@ -33,7 +33,7 @@ litellm:  ## start the LiteLLM router (:4000) — device-code login on first use
 doctor:  ## health-check everything: links, tokens, MCP freshness, env wiring
 	@./scripts/doctor.sh
 
-quota:  ## show each Claude account's membership rate-limit pools
+quota:  ## every account's headroom (Claude pools, Codex usage, OpenRouter credits)
 	@./scripts/quota.sh
 
 history:  ## index all harness transcripts; search with q="regex"

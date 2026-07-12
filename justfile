@@ -38,7 +38,7 @@ litellm:
 doctor:
     ./scripts/doctor.sh
 
-# show each Claude account's membership rate-limit pools
+# every account's headroom (Claude pools, Codex usage, OpenRouter credits)
 quota:
     ./scripts/quota.sh
 
