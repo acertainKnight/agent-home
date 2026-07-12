@@ -141,27 +141,31 @@ else
   echo
   echo "Step 3/4 — accounts (each becomes a login you can switch to in any harness)"
   # spec line = name|provider|dir|keychain|env_key|base_url|port
-  #   anthropic-sub: dir=CLAUDE_CONFIG_DIR, keychain   chatgpt-sub: dir=CODEX_HOME, port
-  #   openai-key: env_key, base_url
+  #   anthropic-sub: dir=CLAUDE_CONFIG_DIR, keychain   chatgpt-sub: dir=CODEX_HOME
+  #   openai-key: env_key, base_url   (chatgpt ports are auto-numbered by the writer)
   ACCT_SPECS=()
-  # Auto-detect Claude accounts from their config dirs.
-  [ -d "$HOME/.claude" ] && ask "  add Claude account 'claude-personal' (~/.claude)?" y \
-    && ACCT_SPECS+=("claude-personal|anthropic-sub|~/.claude|Claude Code-credentials|||")
-  [ -d "$HOME/.claude-work" ] && ask "  add Claude account 'claude-work' (~/.claude-work)?" y \
-    && ACCT_SPECS+=("claude-work|anthropic-sub|~/.claude-work||||")
-  while ask "  add another Claude account?" n; do
+  # 1) Find every account on this machine (any ~/.claude* / ~/.codex*) and suggest each.
+  mapfile -t FOUND < <(python3 scripts/detect-accounts.py --specs)
+  if [ ${#FOUND[@]} -gt 0 ]; then
+    echo "  found ${#FOUND[@]} account(s) on this machine:"
+    for spec in "${FOUND[@]}"; do
+      [ -z "$spec" ] && continue
+      IFS='|' read -r fname fprov fdir _ <<<"$spec"
+      ask "    connect $fprov account '$fname' ($fdir)?" y && ACCT_SPECS+=("$spec")
+    done
+  else
+    echo "  (no existing accounts detected)"
+  fi
+  # 2) Add any accounts that weren't found.
+  while ask "  add another Claude account (a CLAUDE_CONFIG_DIR)?" n; do
     read -r -p "      name (e.g. claude-side): " nm </dev/tty
     read -r -p "      its CLAUDE_CONFIG_DIR (e.g. ~/.claude-side): " cd </dev/tty
     [ -n "$nm" ] && [ -n "$cd" ] && ACCT_SPECS+=("$nm|anthropic-sub|$cd||||")
   done
-  # ChatGPT/Codex accounts — each its own CODEX_HOME (like the Claude split).
-  [ -d "$HOME/.codex" ] && ask "  add ChatGPT/Codex account 'chatgpt-personal' (~/.codex)?" y \
-    && ACCT_SPECS+=("chatgpt-personal|chatgpt-sub|~/.codex||||4001")
-  cxport=4002
-  while ask "  add another ChatGPT/Codex account?" n; do
+  while ask "  add another ChatGPT/Codex account (a CODEX_HOME)?" n; do
     read -r -p "      name (e.g. chatgpt-work): " nm </dev/tty
     read -r -p "      its CODEX_HOME (e.g. ~/.codex-work): " cd </dev/tty
-    [ -n "$nm" ] && [ -n "$cd" ] && ACCT_SPECS+=("$nm|chatgpt-sub|$cd||||$cxport") && cxport=$((cxport+1))
+    [ -n "$nm" ] && [ -n "$cd" ] && ACCT_SPECS+=("$nm|chatgpt-sub|$cd||||")
   done
   ask "  add OpenRouter (OpenAI-compatible API key)?" n \
     && ACCT_SPECS+=("openrouter|openai-key|||OPENROUTER_API_KEY|https://openrouter.ai/api/v1|")
@@ -187,10 +191,13 @@ for line in sys.stdin.read().splitlines():
     if prov == "anthropic-sub":
         a["config_dir"] = dir_; a["keychain"] = keychain or None
     elif prov == "chatgpt-sub":
-        a["codex_home"] = dir_; a["port"] = int(port) if port else 4001
+        a["codex_home"] = dir_  # port assigned below
     elif prov == "openai-key":
         a["env_key"] = envkey; a["base_url"] = baseurl
     accounts.append(a)
+# Auto-number each Codex account's LiteLLM port (4001, 4002, …).
+for i, a in enumerate(x for x in accounts if x["provider"] == "chatgpt-sub"):
+    a["port"] = 4001 + i
 cfg = {}
 if os.path.exists("config.json"):
     try: cfg = json.load(open("config.json"))

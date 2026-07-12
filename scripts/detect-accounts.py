@@ -37,6 +37,20 @@ def detect():
     return accounts
 
 
+def specs():
+    """Pipe-delimited spec lines for the installer: name|provider|dir|keychain|env_key|base_url|port"""
+    out = []
+    for a in detect():
+        if a["provider"] == "anthropic-sub":
+            out.append(f'{a["name"]}|anthropic-sub|{a["config_dir"]}|{a.get("keychain") or ""}|||')
+        elif a["provider"] == "chatgpt-sub":
+            out.append(f'{a["name"]}|chatgpt-sub|{a["codex_home"]}||||')
+    return out
+
+
 if __name__ == "__main__":
-    json.dump({"accounts": detect()}, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    if "--specs" in sys.argv:
+        print("\n".join(specs()))
+    else:
+        json.dump({"accounts": detect()}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
