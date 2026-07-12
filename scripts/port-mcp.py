@@ -48,6 +48,20 @@ def _normalize(name, cfg):
     return e
 
 
+def _expand(obj, subs):
+    """Resolve Claude-plugin path vars (${CLAUDE_PLUGIN_ROOT}, …) to absolute paths,
+    since other harnesses don't provide them."""
+    if isinstance(obj, str):
+        for k, v in subs.items():
+            obj = obj.replace("${%s}" % k, v).replace("$%s" % k, v)
+        return obj
+    if isinstance(obj, list):
+        return [_expand(x, subs) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _expand(v, subs) for k, v in obj.items()}
+    return obj
+
+
 def read_claude_mcp():
     """All MCP servers Claude Code knows: user-level + enabled plugins' .mcp.json."""
     servers = {}
@@ -62,13 +76,17 @@ def read_claude_mcp():
         enabled = json.load(open(HOME / ".claude/settings.json")).get("enabledPlugins", {})
     except (OSError, KeyError, json.JSONDecodeError):
         inst, enabled = {}, {}
+    data_root = HOME / ".claude/plugins/data"
     for name, entries in inst.items():
         if not enabled.get(name):
             continue
-        mf = Path(entries[0]["installPath"]) / ".mcp.json"
+        root = Path(entries[0]["installPath"])
+        mf = root / ".mcp.json"
         if mf.exists():
+            subs = {"CLAUDE_PLUGIN_ROOT": str(root),
+                    "CLAUDE_PLUGIN_DATA": str(data_root / name.split("@")[0])}
             for n, c in json.load(open(mf)).get("mcpServers", {}).items():
-                servers.setdefault(n, _normalize(n, c))  # user-level wins on name clash
+                servers.setdefault(n, _normalize(n, _expand(c, subs)))
     return servers
 
 
@@ -171,17 +189,21 @@ def _toml_str(s):
 
 
 def generate_codex():
-    """Append MCP servers to ~/.codex/config.toml (append-only = non-breaking).
+    """Write MCP servers to ~/.codex/config.toml. Idempotent: rewrites our managed
+    [mcp_servers.*] blocks (so updates land), leaves every other key/table intact.
     stdio: command/args/env. remote (Streamable HTTP): url + bearer_token_env_var or
     auth=oauth, gated by [features] experimental_use_rmcp_client."""
     servers = load_canon()
     if not servers:
         return
     existing = CODEX_TOML.read_text() if CODEX_TOML.exists() else ""
+    # Idempotent + updatable: drop our managed server blocks, then re-emit fresh.
+    # (User's own [mcp_servers.*] not in canonical are left untouched.)
+    for n in servers:
+        existing = re.sub(r"(?ms)^\n?\[mcp_servers\." + re.escape(n) + r"\].*?(?=^\[|\Z)", "", existing)
+    existing = existing.rstrip() + "\n"
     blocks, reauth, has_remote = [], [], False
     for n, e in servers.items():
-        if f"[mcp_servers.{n}]" in existing:
-            continue
         lines = [f"\n[mcp_servers.{n}]"]
         if e["transport"] == "stdio":
             lines.append(f"command = {_toml_str(e['command'])}")
@@ -206,11 +228,9 @@ def generate_codex():
             print("  ! add `experimental_use_rmcp_client = true` under [features] in config.toml for remote MCP")
         else:
             prefix = "\n[features]\nexperimental_use_rmcp_client = true\n"
-    if blocks:
-        CODEX_TOML.parent.mkdir(parents=True, exist_ok=True)
-        with open(CODEX_TOML, "a") as f:
-            f.write("\n" + prefix + "\n".join(blocks) + "\n")
-    print(f"codex: added {len(blocks)} MCP server(s)"
+    CODEX_TOML.parent.mkdir(parents=True, exist_ok=True)
+    CODEX_TOML.write_text(existing.rstrip() + "\n" + prefix + "\n".join(blocks) + "\n")
+    print(f"codex: wrote {len(blocks)} MCP server(s)"
           + (f"; re-authenticate in Codex: {reauth}" if reauth else ""))
 
 
