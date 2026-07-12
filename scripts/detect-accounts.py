@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Auto-detect Claude accounts on THIS machine from its CLAUDE_CONFIG_DIR-style
-dirs (~/.claude, ~/.claude-work, ~/.claude-*). Prints a config.json `accounts`
-array. Used as the fallback so a fresh/teammate machine gets ITS OWN accounts,
-never a checked-in default. ChatGPT/key accounts are opt-in via the walkthrough,
-so they aren't auto-added here."""
+"""Auto-detect accounts on THIS machine from its per-account config dirs:
+Claude (~/.claude, ~/.claude-work, ~/.claude-*) and Codex (~/.codex, ~/.codex-*).
+Prints a config.json `accounts` array. Used as the fallback so a fresh/teammate
+machine gets ITS OWN accounts, never a checked-in default. Key accounts
+(OpenRouter etc.) are opt-in via the walkthrough, so they aren't auto-added."""
 import json
 import sys
 from pathlib import Path
@@ -11,25 +11,29 @@ from pathlib import Path
 HOME = Path.home()
 
 
-def looks_like_claude_dir(p):
-    return p.is_dir() and any((p / f).exists() for f in (".credentials.json", "settings.json", "projects"))
+def _profiles(base, markers):
+    """~/{base} then ~/{base}-* dirs that look real (contain any marker file)."""
+    cands = [HOME / base] + sorted(d for d in HOME.glob(base + "-*"))
+    return [d for d in cands if d.is_dir() and any((d / m).exists() for m in markers)]
 
 
 def detect():
     accounts = []
-    # personal first if present, then any other ~/.claude* profile dirs
-    candidates = [HOME / ".claude"] + sorted(
-        d for d in HOME.glob(".claude-*") if d.name != ".claude"
-    )
-    for d in candidates:
-        if not looks_like_claude_dir(d):
-            continue
+    for d in _profiles(".claude", (".credentials.json", "settings.json", "projects")):
         suffix = d.name[len(".claude"):].lstrip("-") or "personal"
-        name = f"claude-{suffix}"
-        acct = {"name": name, "provider": "anthropic-sub", "config_dir": "~/" + d.name}
-        # The default profile also has a macOS keychain entry.
-        acct["keychain"] = "Claude Code-credentials" if d.name == ".claude" else None
-        accounts.append(acct)
+        accounts.append({
+            "name": f"claude-{suffix}", "provider": "anthropic-sub",
+            "config_dir": "~/" + d.name,
+            "keychain": "Claude Code-credentials" if d.name == ".claude" else None,
+        })
+    port = 4001
+    for d in _profiles(".codex", ("auth.json", "config.toml")):
+        suffix = d.name[len(".codex"):].lstrip("-") or "personal"
+        accounts.append({
+            "name": f"chatgpt-{suffix}", "provider": "chatgpt-sub",
+            "codex_home": "~/" + d.name, "port": port,
+        })
+        port += 1
     return accounts
 
 

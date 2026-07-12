@@ -38,9 +38,11 @@ import json, os
 try: c = json.load(open("config.json"))
 except OSError: c = {}
 # "|" delimiter (not IFS-whitespace) so empty fields survive read.
+# dir = the accounts config dir: CLAUDE_CONFIG_DIR (claude) or CODEX_HOME (codex).
 for a in c.get("accounts", c.get("claude_accounts", [])):
+    d = a.get("config_dir") or a.get("codex_home") or ""
     print(a.get("name",""), a.get("provider","anthropic-sub"),
-          os.path.expanduser(a.get("config_dir","")), a.get("env_key",""), sep="|")
+          os.path.expanduser(d), a.get("env_key",""), sep="|")
 '; }
 
 login_walkthrough() {
@@ -60,11 +62,12 @@ login_walkthrough() {
           $interactive && ask "      log in now?" y && CLAUDE_CONFIG_DIR="$cdir" claude auth login || true
         fi ;;
       chatgpt-sub)
-        if command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1; then
-          echo "  ✓ $name (chatgpt) — codex logged in"
+        home="${cdir:-$HOME/.codex}"
+        if command -v codex >/dev/null 2>&1 && CODEX_HOME="$home" codex login status >/dev/null 2>&1; then
+          echo "  ✓ $name (chatgpt) — logged in (CODEX_HOME=$home)"
         else
-          echo "  ✗ $name (chatgpt) — not logged in  →  codex login"
-          $interactive && ask "      run 'codex login' now?" y && codex login || true
+          echo "  ✗ $name (chatgpt) — not logged in  →  CODEX_HOME=$home codex login"
+          $interactive && ask "      run 'codex login' for $name now?" y && CODEX_HOME="$home" codex login || true
         fi ;;
       openai-key)
         val=""; [ -n "$envkey" ] && eval "val=\"\${$envkey:-}\""  # bash 3.2-safe indirect
@@ -137,7 +140,9 @@ else
     ask "  set up ${LABEL[$h]}?" "$(detected "$h" && echo y || echo n)" && TARGETS+=("$h"); done
   echo
   echo "Step 3/4 — accounts (each becomes a login you can switch to in any harness)"
-  # spec line = name|provider|config_dir|keychain|env_key|token_dir|base_url
+  # spec line = name|provider|dir|keychain|env_key|base_url|port
+  #   anthropic-sub: dir=CLAUDE_CONFIG_DIR, keychain   chatgpt-sub: dir=CODEX_HOME, port
+  #   openai-key: env_key, base_url
   ACCT_SPECS=()
   # Auto-detect Claude accounts from their config dirs.
   [ -d "$HOME/.claude" ] && ask "  add Claude account 'claude-personal' (~/.claude)?" y \
@@ -149,10 +154,17 @@ else
     read -r -p "      its CLAUDE_CONFIG_DIR (e.g. ~/.claude-side): " cd </dev/tty
     [ -n "$nm" ] && [ -n "$cd" ] && ACCT_SPECS+=("$nm|anthropic-sub|$cd||||")
   done
-  ask "  add a ChatGPT / Codex subscription account?" y \
-    && ACCT_SPECS+=("chatgpt-personal|chatgpt-sub|||~/.agent-home/auth/chatgpt-personal|")
+  # ChatGPT/Codex accounts — each its own CODEX_HOME (like the Claude split).
+  [ -d "$HOME/.codex" ] && ask "  add ChatGPT/Codex account 'chatgpt-personal' (~/.codex)?" y \
+    && ACCT_SPECS+=("chatgpt-personal|chatgpt-sub|~/.codex||||4001")
+  cxport=4002
+  while ask "  add another ChatGPT/Codex account?" n; do
+    read -r -p "      name (e.g. chatgpt-work): " nm </dev/tty
+    read -r -p "      its CODEX_HOME (e.g. ~/.codex-work): " cd </dev/tty
+    [ -n "$nm" ] && [ -n "$cd" ] && ACCT_SPECS+=("$nm|chatgpt-sub|$cd||||$cxport") && cxport=$((cxport+1))
+  done
   ask "  add OpenRouter (OpenAI-compatible API key)?" n \
-    && ACCT_SPECS+=("openrouter|openai-key||||OPENROUTER_API_KEY|https://openrouter.ai/api/v1")
+    && ACCT_SPECS+=("openrouter|openai-key|||OPENROUTER_API_KEY|https://openrouter.ai/api/v1|")
   echo
   echo "Step 4/4 — options"
   LITELLM=false; ask "  set up LiteLLM proxy (ChatGPT sub + OpenRouter + local on :4000)?" y && LITELLM=true
@@ -170,12 +182,12 @@ accounts = []
 for line in sys.stdin.read().splitlines():
     if not line.strip():
         continue
-    name, prov, cdir, keychain, envkey, tokendir, baseurl = (line.split("|") + [""]*7)[:7]
+    name, prov, dir_, keychain, envkey, baseurl, port = (line.split("|") + [""]*7)[:7]
     a = {"name": name, "provider": prov}
     if prov == "anthropic-sub":
-        a["config_dir"] = cdir; a["keychain"] = keychain or None
+        a["config_dir"] = dir_; a["keychain"] = keychain or None
     elif prov == "chatgpt-sub":
-        a["token_dir"] = tokendir; a["port"] = 4001
+        a["codex_home"] = dir_; a["port"] = int(port) if port else 4001
     elif prov == "openai-key":
         a["env_key"] = envkey; a["base_url"] = baseurl
     accounts.append(a)
@@ -211,7 +223,10 @@ fi
 if [ "$(has_target codex)" = "True" ]; then
   echo "== 3. Codex CLI =="
   command -v codex >/dev/null 2>&1 || { command -v npm >/dev/null 2>&1 && npm install -g @openai/codex || echo "  ! npm i -g @openai/codex"; }
-  [ -f "$HOME/.codex/config.toml" ] || { mkdir -p "$HOME/.codex"; cp templates/codex.config.toml "$HOME/.codex/config.toml"; echo "  wrote ~/.codex/config.toml"; }
+  # One config.toml per CODEX_HOME (one per ChatGPT/Codex account).
+  for home in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))"); do
+    [ -f "$home/config.toml" ] || { mkdir -p "$home"; cp templates/codex.config.toml "$home/config.toml"; echo "  wrote $home/config.toml"; }
+  done
 fi
 
 if [ "$(has_target opencode)" = "True" ]; then

@@ -42,13 +42,29 @@ HARNESSES = {
         (CANON / "AGENTS.md", HOME / ".config/opencode/AGENTS.md"),
         (CANON / "commands", HOME / ".config/opencode/command"),  # note: singular
     ],
-    # Codex CLI: reads ~/.codex/AGENTS.md, ~/.codex/prompts/ (slash commands),
-    # + ~/.agents/skills.
-    "codex": [
-        (CANON / "AGENTS.md", HOME / ".codex/AGENTS.md"),
-        (CANON / "commands", HOME / ".codex/prompts"),
-    ],
+    # Codex CLI is handled dynamically (one CODEX_HOME per chatgpt-sub account);
+    # see codex_links() below.
 }
+
+
+def _accounts():
+    c = load_config()
+    return c.get("accounts", c.get("claude_accounts", []))
+
+
+def codex_homes():
+    """Every Codex account's CODEX_HOME (defaults to ~/.codex if none defined)."""
+    homes = [os.path.expanduser(a["codex_home"]) for a in _accounts()
+             if a.get("provider") == "chatgpt-sub" and a.get("codex_home")]
+    return homes or [str(HOME / ".codex")]
+
+
+def codex_links():
+    out = []
+    for h in codex_homes():
+        h = Path(h)
+        out += [(CANON / "AGENTS.md", h / "AGENTS.md"), (CANON / "commands", h / "prompts")]
+    return out
 
 # Native skill dirs to MERGE into the store on --adopt (skills reach these
 # harnesses via ~/.agents/skills, so we import but don't keep a back-link).
@@ -66,6 +82,8 @@ def links_for(names):
     out = []
     for name in names:
         out += HARNESSES.get(name, [])
+    if "codex" in names:
+        out += codex_links()  # one CODEX_HOME per chatgpt-sub account
     return out
 
 
@@ -73,7 +91,7 @@ def target_names():
     """Harnesses to link the store into."""
     cfg = load_config().get("harnesses")
     if not cfg:
-        return list(HARNESSES)
+        return list(HARNESSES) + ["codex"]
     return [n for n, on in cfg.items() if on]
 
 

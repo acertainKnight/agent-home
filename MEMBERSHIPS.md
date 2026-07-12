@@ -75,9 +75,12 @@ Accounts are provider-agnostic — define as many as you want in
 - **`anthropic-sub`** (Claude Max/Pro): `config_dir` (a `CLAUDE_CONFIG_DIR`, e.g.
   `~/.claude` personal, `~/.claude-work` work) + optional `keychain`. This mirrors
   exactly how you already run two Claude Code profiles.
-- **`chatgpt-sub`** (ChatGPT/Codex): `token_dir` (its own `CHATGPT_TOKEN_DIR` /
-  `CODEX_HOME`) so multiple ChatGPT logins don't collide, + a `port` for that
-  account's LiteLLM instance.
+- **`chatgpt-sub`** (ChatGPT/Codex): `codex_home` (its own `CODEX_HOME`, e.g.
+  `~/.codex` and `~/.codex-work`) so multiple Codex logins don't collide — exactly
+  like the Claude two-config-dir split — + a `port` for that account's LiteLLM
+  instance. `make install` auto-detects `~/.codex*` dirs and lets you add more;
+  sync links the store into every Codex home, and each is logged in with
+  `CODEX_HOME=<dir> codex login`, switched with `CODEX_HOME=<dir> codex`.
 - **`openai-key`** (OpenRouter and any OpenAI-compatible key): `env_key` + `base_url`.
 
 **One universal primitive** — `scripts/claude-token.sh <account>` returns a live
@@ -91,10 +94,12 @@ guidance), never printing it elsewhere. `scripts/verify-claude-membership.sh
 - *Claude accounts in opencode* — opencode-claude-auth auto-detects multiple
   keychain credentials; log each account in once
   (`CLAUDE_CONFIG_DIR=<dir> claude`) and both appear. (Ban-risk opt-in.)
-- *ChatGPT accounts* — run one LiteLLM instance per account with its own
-  `CHATGPT_TOKEN_DIR` on its own port; each shows up as `chatgpt/*` models that
-  any harness selects by pointing at that port. Codex's native `codex login`
-  covers one ChatGPT account per `CODEX_HOME`.
+- *ChatGPT/Codex accounts* — each is its own `CODEX_HOME` (`~/.codex`,
+  `~/.codex-work`, …): `CODEX_HOME=<dir> codex login` once each, switch with
+  `CODEX_HOME=<dir> codex`. `make install` sets up and logs in every one. To reach
+  those same accounts from *other* harnesses, run one LiteLLM instance per account
+  with its own `CHATGPT_TOKEN_DIR` on its `port`; each appears as `chatgpt/*`
+  models a harness selects by pointing at that port.
 - *Key providers* — a LiteLLM model group per key; select by model name.
 
 **Tested here (2026-07-11):** `claude-personal` verified live on the Max
