@@ -37,6 +37,7 @@ HARNESSES = {
     "claude-code-work": [
         (CANON / "workflows", HOME / ".claude-work/workflows"),
         (CANON / "AGENTS.md", HOME / ".claude-work/CLAUDE.md"),
+        (CANON / "commands", HOME / ".claude-work/commands"),
     ],
     # opencode: reads ~/.config/opencode/AGENTS.md, its own command/ dir, and
     # ~/.agents/skills + ~/.claude/skills natively.
