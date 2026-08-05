@@ -29,14 +29,16 @@ cat > "$PLIST" <<EOF
 <plist version="1.0"><dict>
   <key>Label</key><string>com.agent-home.sync</string>
   <key>ProgramArguments</key><array>
-    <string>$(command -v python3)</string>
-    <string>$PWD/sync.py</string>
+    <string>/bin/bash</string>
+    <string>$PWD/scripts/resync.sh</string>
   </array>
   <key>WatchPaths</key><array>
     <string>$HOME/.claude/plugins/installed_plugins.json</string>
     <string>$STORE/skills</string>
     <string>$STORE/commands</string>
+    <string>$STORE/agents</string>
   </array>
+  <key>StartInterval</key><integer>3600</integer>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>StandardOutPath</key><string>$STORE/.watcher.log</string>
   <key>StandardErrorPath</key><string>$STORE/.watcher.log</string>
@@ -44,4 +46,4 @@ cat > "$PLIST" <<EOF
 EOF
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "watcher installed: plugins/skills changes now auto-run sync (log: $STORE/.watcher.log)"
+echo "watcher installed: full resync on plugin/store changes + hourly (log: $STORE/.watcher.log)"

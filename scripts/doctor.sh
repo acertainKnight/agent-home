@@ -34,6 +34,59 @@ else
   ok "plugin skills up to date"
 fi
 
+# codex native skill dir mirrors ~/.agents/skills
+for chome in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))" 2>/dev/null); do
+  WANT=$(find "$HOME/.agents/skills" -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')
+  HAVE=$(find "$chome/skills" -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')
+  CBROKEN=$(find "$chome/skills" -maxdepth 1 -type l ! -exec test -e {} \; -print 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${CBROKEN:-0}" -gt 0 ] || [ "${HAVE:-0}" -lt "${WANT:-0}" ]; then
+    bad "$chome/skills: $HAVE/$WANT skills linked, $CBROKEN broken — run: make sync"
+  else
+    ok "$chome/skills: $HAVE skills linked"
+  fi
+done
+
+# opencode reads the shared skill library
+OCJ="$HOME/.config/opencode/opencode.jsonc"
+if [ -f "$OCJ" ]; then
+  grep -qs '.agents/skills' "$OCJ" \
+    && ok "opencode skills.paths -> ~/.agents/skills" \
+    || bad "opencode.jsonc missing skills.paths — run: python3 scripts/wire-opencode.py"
+fi
+
+# generated command library (store + plugin commands → codex prompts, opencode command)
+CMDS=$(find "$HOME/.agents/commands" -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')
+[ "${CMDS:-0}" -gt 0 ] && ok "~/.agents/commands: $CMDS commands linked" \
+  || bad "~/.agents/commands empty — run: make sync"
+
+# auto-resync watcher
+launchctl list 2>/dev/null | grep -q com.agent-home.sync \
+  && ok "auto-resync watcher loaded (hourly + on change)" \
+  || bad "watcher not loaded — run: make watcher"
+
+# cortex env parity: Claude gets CORTEX_* via settings.json env; other harnesses
+# (and the codex distill sweep) only see it through the shared env file.
+if python3 -c "import json,sys;s=json.load(open('$HOME/.claude/settings.json'));sys.exit(0 if 'CORTEX_API_TOKEN' in s.get('env',{}) else 1)" 2>/dev/null; then
+  grep -qs 'CORTEX_API_TOKEN' "$STORE/env" 2>/dev/null \
+    && ok "cortex env shared cross-harness" \
+    || bad "CORTEX_* env only in Claude settings.json — copy to $STORE/env"
+fi
+[ -z "${CORTEX_BRAIN_URL:-}" ] && ! grep -qs 'CORTEX_BRAIN_URL' "$STORE/env" 2>/dev/null \
+  && info "CORTEX_BRAIN_URL unset — session distill dormant in ALL harnesses (hooks exit early)"
+
+# codex native memory (memories_*.sqlite): we rely on AGENTS.md pointing codex
+# at the shared store; if its own memory starts filling up, those learnings are
+# invisible to other harnesses until exported.
+for chome in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))" 2>/dev/null); do
+  for db in "$chome"/memories_*.sqlite; do
+    [ -f "$db" ] || continue
+    ROWS=$(sqlite3 "$db" "select count(*) from stage1_outputs" 2>/dev/null || echo 0)
+    [ "${ROWS:-0}" -eq 0 ] \
+      && ok "codex native memory empty (all learnings flow through the store)" \
+      || bad "codex native memory has $ROWS session memories NOT in the shared store — export or disable codex memory"
+  done
+done
+
 # accounts (token liveness; never prints tokens)
 while IFS='|' read -r name provider cdir envkey; do
   [ -z "$name" ] && continue

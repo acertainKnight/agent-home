@@ -40,6 +40,14 @@ cfg.setdefault("$schema", "https://opencode.ai/config.json")
 cfg.setdefault("provider", {})
 cfg["provider"]["litellm"] = LITELLM_PROVIDER  # our key; other providers untouched
 
+# Shared skill library: opencode's native skill tool scans every dir listed in
+# skills.paths, so pointing it at ~/.agents/skills gives it the same skill set
+# as Claude Code and Codex without copying anything.
+AGENTS_SKILLS = os.path.expanduser("~/.agents/skills")
+paths = cfg.setdefault("skills", {}).setdefault("paths", [])
+if AGENTS_SKILLS not in paths:
+    paths.append(AGENTS_SKILLS)
+
 plugins = [p for p in cfg.get("plugin", []) if p != PLUGIN]
 if CIO:
     plugins.append(PLUGIN)

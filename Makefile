@@ -15,6 +15,9 @@ login:  ## log in & verify every account in config.json
 sync:  ## re-merge the store into all harnesses (after adding a skill/plugin)
 	@python3 sync.py --adopt
 
+resync:  ## everything: sync + mcp + agents + history + codex distill (what the watcher runs)
+	@./scripts/resync.sh
+
 mcp:  ## pull all MCP servers into the store, distribute to opencode + codex
 	@python3 scripts/port-mcp.py adopt && python3 scripts/port-mcp.py apply && python3 scripts/port-mcp.py list
 

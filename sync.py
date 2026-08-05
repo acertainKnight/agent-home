@@ -25,6 +25,8 @@ CANON = Path(os.environ.get("AGENT_HOME", HOME / ".agent-home"))
 # portable across teammates' machines.
 HARNESSES = {
     # Claude Code, personal account: full canonical mount + native auto-memory.
+    # ~/.remember is the remember-plugin's rolling session log; storing it here
+    # lets every harness read it (writes still come from the Claude Code plugin).
     "claude-code": [
         (CANON / "skills", HOME / ".claude/skills"),
         (CANON / "agents", HOME / ".claude/agents"),
@@ -32,6 +34,7 @@ HARNESSES = {
         (CANON / "memory", HOME / ".claude/auto-memory"),
         (CANON / "workflows", HOME / ".claude/workflows"),
         (CANON / "AGENTS.md", HOME / ".claude/CLAUDE.md"),
+        (CANON / "remember", HOME / ".remember"),
     ],
     # Second Claude Code profile (e.g. work). Shares ~/.claude/skills already.
     "claude-code-work": [
@@ -39,11 +42,12 @@ HARNESSES = {
         (CANON / "AGENTS.md", HOME / ".claude-work/CLAUDE.md"),
         (CANON / "commands", HOME / ".claude-work/commands"),
     ],
-    # opencode: reads ~/.config/opencode/AGENTS.md, its own command/ dir, and
-    # ~/.agents/skills + ~/.claude/skills natively.
+    # opencode: reads ~/.config/opencode/AGENTS.md, its own command/ dir (pointed
+    # at the generated shared-command library so plugin commands port too), and
+    # skills via skills.paths in opencode.jsonc (wire-opencode.py).
     "opencode": [
         (CANON / "AGENTS.md", HOME / ".config/opencode/AGENTS.md"),
-        (CANON / "commands", HOME / ".config/opencode/command"),  # note: singular
+        (HOME / ".agents/commands", HOME / ".config/opencode/command"),  # note: singular
     ],
     # Codex CLI is handled dynamically (one CODEX_HOME per chatgpt-sub account);
     # see codex_links() below.
@@ -66,7 +70,8 @@ def codex_links():
     out = []
     for h in codex_homes():
         h = Path(h)
-        out += [(CANON / "AGENTS.md", h / "AGENTS.md"), (CANON / "commands", h / "prompts")]
+        out += [(CANON / "AGENTS.md", h / "AGENTS.md"),
+                (HOME / ".agents/commands", h / "prompts")]
     return out
 
 # Native skill dirs to MERGE into the store on --adopt (skills reach these
@@ -107,44 +112,80 @@ def source_names():
 SYMLINKS = links_for(target_names())
 
 AGENTS_SKILLS = HOME / ".agents/skills"  # universal skill dir (Codex, opencode, spec default)
+AGENTS_COMMANDS = HOME / ".agents/commands"  # generated command/prompt library
 
 
-def enabled_plugin_skill_dirs():
-    """Skill dirs shipped by ENABLED Claude Code plugins (plugins themselves don't port)."""
+def _enabled_plugin_roots():
     try:
         inst = json.load(open(HOME / ".claude/plugins/installed_plugins.json"))["plugins"]
         enabled = json.load(open(HOME / ".claude/settings.json")).get("enabledPlugins", {})
     except (OSError, KeyError, json.JSONDecodeError):
         return []
+    return [Path(entries[0]["installPath"]) for name, entries in inst.items() if enabled.get(name)]
+
+
+def enabled_plugin_skill_dirs():
+    """Skill dirs shipped by ENABLED Claude Code plugins (plugins themselves don't port)."""
     out = []
-    for name, entries in inst.items():
-        if not enabled.get(name):
-            continue
-        skills = Path(entries[0]["installPath"]) / "skills"
+    for root in _enabled_plugin_roots():
+        skills = root / "skills"
         if skills.is_dir():
             out += [d for d in skills.iterdir() if (d / "SKILL.md").exists()]
     return out
 
 
-def build_agents_skills():
-    """~/.agents/skills = union of canonical skills + enabled plugin skills,
-    as per-skill symlinks. Canonical wins on name collision. Regenerated each run."""
-    AGENTS_SKILLS.mkdir(parents=True, exist_ok=True)
-    for entry in AGENTS_SKILLS.iterdir():
+def enabled_plugin_command_files():
+    """Command/prompt markdown shipped by ENABLED plugins — portable to any
+    harness with a prompt dir (Codex prompts/, opencode command/)."""
+    out = []
+    for root in _enabled_plugin_roots():
+        cmds = root / "commands"
+        if cmds.is_dir():
+            out += sorted(cmds.rglob("*.md"))
+    return out
+
+
+def build_command_links():
+    """~/.agents/commands = store commands + enabled plugin commands, as flat
+    per-file symlinks. Store wins on name collision; first plugin wins after."""
+    AGENTS_COMMANDS.mkdir(parents=True, exist_ok=True)
+    for entry in AGENTS_COMMANDS.iterdir():
         if entry.is_symlink():
             entry.unlink()
-        else:
+        elif not entry.name.startswith("."):
+            print(f"skip stale {entry}: not a symlink, not touching", file=sys.stderr)
+    seen = set()
+    for f in sorted(CANON.glob("commands/*.md")) + enabled_plugin_command_files():
+        if f.name in seen:
+            continue
+        seen.add(f.name)
+        link = AGENTS_COMMANDS / f.name
+        if link.exists() and not link.is_symlink():
+            continue
+        link.symlink_to(f)
+    print(f"{AGENTS_COMMANDS}: {len(seen)} commands linked")
+
+
+def build_skill_links(dest):
+    """dest = union of canonical skills + enabled plugin skills, as per-skill
+    symlinks. Canonical wins on name collision. Regenerated each run. Hidden
+    entries (Codex's .system) and real dirs are left alone."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for entry in dest.iterdir():
+        if entry.is_symlink():
+            entry.unlink()
+        elif not entry.name.startswith("."):
             print(f"skip stale {entry}: not a symlink, not touching", file=sys.stderr)
     seen = set()
     for d in sorted(CANON.glob("skills/*")) + enabled_plugin_skill_dirs():
         if not (d / "SKILL.md").exists() or d.name in seen:
             continue
         seen.add(d.name)
-        link = AGENTS_SKILLS / d.name
+        link = dest / d.name
         if link.exists() and not link.is_symlink():
             continue  # stale real dir, already warned above
         link.symlink_to(d)
-    print(f"~/.agents/skills: {len(seen)} skills linked")
+    print(f"{dest}: {len(seen)} skills linked")
 
 
 def status():
@@ -183,22 +224,27 @@ def _same(a, b):
     return False
 
 
+def _merge_item(item, store, tag):
+    """Move one file/dir into the store: new → move, identical → drop the copy,
+    different → keep alongside as `name.from-<harness>` so nothing is ever lost."""
+    target = store / item.name
+    if not target.exists():
+        shutil.move(str(item), str(target))
+        print(f"  + {store.name}/{item.name} (from {tag})")
+    elif _same(item, target):
+        (shutil.rmtree if item.is_dir() else lambda p: Path(p).unlink())(item)
+    else:
+        alt = store / f"{item.stem}.from-{tag}{item.suffix}"
+        shutil.move(str(item), str(alt))
+        print(f"  ! conflict {item.name}: kept as {alt.name} (from {tag})", file=sys.stderr)
+
+
 def merge_into_store(store, src, tag):
-    """Union a harness dir/file into the store. Same-name-different-content is
-    kept alongside as `name.from-<harness>` so nothing is ever lost."""
+    """Union a harness dir/file into the store."""
     if src.is_dir():
         store.mkdir(parents=True, exist_ok=True)
         for item in list(src.iterdir()):
-            target = store / item.name
-            if not target.exists():
-                shutil.move(str(item), str(target))
-                print(f"  + {store.name}/{item.name} (from {tag})")
-            elif _same(item, target):
-                (shutil.rmtree if item.is_dir() else lambda p: Path(p).unlink())(item)
-            else:
-                alt = store / f"{item.stem}.from-{tag}{item.suffix}"
-                shutil.move(str(item), str(alt))
-                print(f"  ! conflict {item.name}: kept as {alt.name} (from {tag})", file=sys.stderr)
+            _merge_item(item, store, tag)
         shutil.rmtree(src)
     else:  # instruction file: concatenate distinct content under a header
         if not store.exists():
@@ -220,13 +266,26 @@ def adopt():
         if dst.is_symlink() or not dst.exists():
             continue
         merge_into_store(src, dst, _harness_of(dst))
-    # Native skill dirs that aren't in the link map (imported, not back-linked).
+    # Native skill dirs that aren't in the link map: import real skills only.
+    # Hidden entries (Codex ships built-ins in .system) and symlinks (our own
+    # generated links) stay put — the dir itself is never deleted.
     for d in SKILL_SWEEP:
-        if d.is_dir() and not d.is_symlink():
-            merge_into_store(CANON / "skills", d, _harness_of(d))
+        if not d.is_dir() or d.is_symlink():
+            continue
+        for child in list(d.iterdir()):
+            if child.name.startswith(".") or child.is_symlink():
+                continue
+            if (child / "SKILL.md").exists():
+                _merge_item(child, CANON / "skills", _harness_of(child))
 
 
 def apply():
+    # Generated libraries first: they are link *sources* for codex/opencode.
+    build_skill_links(AGENTS_SKILLS)
+    build_command_links()
+    if "codex" in target_names():  # Codex reads CODEX_HOME/skills natively
+        for h in codex_homes():
+            build_skill_links(Path(h) / "skills")
     for src, dst in SYMLINKS:
         if not src.exists():
             continue
@@ -240,7 +299,6 @@ def apply():
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.symlink_to(src)
         print(f"link {dst} -> {src}")
-    build_agents_skills()
 
 
 if __name__ == "__main__":
