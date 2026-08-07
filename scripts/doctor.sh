@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # agent-home doctor — one command that says whether the whole system is still
 # healthy, and the exact fix when it isn't. Read-only; safe to run anytime.
+#
+# Standing rule: a health check must assert that a thing RAN and produced the
+# RIGHT CONTENT — never that it exists. "Listed in launchctl" is not "running
+# successfully"; "file is newer" is not "file has the right keys."
 set -uo pipefail   # no -e: every check must run even after a failure
 cd "$(dirname "$0")/.."
 STORE="${AGENT_HOME:-$HOME/.agent-home}"
@@ -46,12 +50,42 @@ for chome in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))" 2>/
   fi
 done
 
-# opencode reads the shared skill library
+# opencode.jsonc must parse, and must carry the key wire-opencode.py owns
+# post-LiteLLM-retirement (skills.paths — NOT provider.litellm, which is gone
+# on purpose: opencode >=1.18 does native auth instead, checked below).
 OCJ="$HOME/.config/opencode/opencode.jsonc"
 if [ -f "$OCJ" ]; then
-  grep -qs '.agents/skills' "$OCJ" \
-    && ok "opencode skills.paths -> ~/.agents/skills" \
-    || bad "opencode.jsonc missing skills.paths — run: python3 scripts/wire-opencode.py"
+  OCJ_STATUS=$(python3 - "$OCJ" <<'PY' 2>/dev/null
+import json, re, sys
+raw = open(sys.argv[1]).read()
+raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+raw = re.sub(r"(^|\s)//[^\n]*", "", raw)
+raw = re.sub(r",(\s*[}\]])", r"\1", raw)
+try:
+    cfg = json.loads(raw) or {}
+except json.JSONDecodeError:
+    print("PARSE_FAIL"); sys.exit()
+print("OK" if cfg.get("skills", {}).get("paths") else "NO_KEY")
+PY
+)
+  case "$OCJ_STATUS" in
+    OK)     ok "opencode.jsonc: parses, skills.paths -> ~/.agents/skills" ;;
+    NO_KEY) bad "opencode.jsonc parses but skills.paths missing — run: python3 scripts/wire-opencode.py" ;;
+    *)      bad "opencode.jsonc UNPARSEABLE — run: python3 scripts/wire-opencode.py (backs up + rewrites clean)" ;;
+  esac
+
+  # native auth (opencode >=1.18) — replaces the retired provider.litellm block
+  OC_AUTH="$HOME/.local/share/opencode/auth.json"
+  if [ -f "$OC_AUTH" ]; then
+    python3 -c "import json,sys;sys.exit(0 if 'openrouter' in json.load(open('$OC_AUTH')) else 1)" 2>/dev/null \
+      && ok "opencode: OpenRouter native auth present" \
+      || bad "opencode: no openrouter entry in $OC_AUTH — run: opencode auth login"
+    python3 -c "import json,sys;a=json.load(open('$OC_AUTH'));sys.exit(0 if any(k in a for k in ('openai','chatgpt')) else 1)" 2>/dev/null \
+      && ok "opencode: ChatGPT-plan native auth present" \
+      || info "opencode: no ChatGPT-plan login (optional — opencode auth login)"
+  else
+    bad "opencode: no $OC_AUTH — run: opencode auth login"
+  fi
 fi
 
 # generated command library (store + plugin commands → codex prompts, opencode command)
@@ -59,10 +93,29 @@ CMDS=$(find "$HOME/.agents/commands" -maxdepth 1 -type l 2>/dev/null | wc -l | t
 [ "${CMDS:-0}" -gt 0 ] && ok "~/.agents/commands: $CMDS commands linked" \
   || bad "~/.agents/commands empty — run: make sync"
 
-# auto-resync watcher
-launchctl list 2>/dev/null | grep -q com.agent-home.sync \
-  && ok "auto-resync watcher loaded (hourly + on change)" \
-  || bad "watcher not loaded — run: make watcher"
+# auto-resync watcher — "loaded" is not "working": this printed "loaded" through
+# 104 consecutive real failures because it only checked launchctl's job LIST,
+# never the job's exit status or whether a resync ever actually completed. Now
+# it reads the exit-status column (3rd field of `launchctl list`'s matching
+# line; "0" or "-" = healthy, anything else = the last run failed) AND
+# requires a "resync complete" line in the watcher log within 2x StartInterval
+# (300s in scripts/install-watcher.sh, so 600s here).
+WSTATUS=$(launchctl list 2>/dev/null | awk '$3=="com.agent-home.sync"{print $2}')
+MAXAGE=600
+if [ -z "$WSTATUS" ]; then
+  bad "watcher not loaded — run: make watcher"
+elif [ "$WSTATUS" != "0" ] && [ "$WSTATUS" != "-" ]; then
+  bad "watcher loaded but last run exited $WSTATUS — see $STORE/.watcher.log"
+else
+  LAST=$(grep -a "resync complete" "$STORE/.watcher.log" 2>/dev/null | tail -1 | sed 's/.*resync complete //')
+  LAST_EPOCH=$(date -j -f "%F %T" "${LAST:-1970-01-01 00:00:00}" +%s 2>/dev/null || echo 0)
+  AGE=$(( $(date +%s) - LAST_EPOCH ))
+  if [ -n "$LAST" ] && [ "$AGE" -le "$MAXAGE" ]; then
+    ok "auto-resync watcher: exit $WSTATUS, last resync ${AGE}s ago (limit ${MAXAGE}s)"
+  else
+    bad "watcher: no successful resync within ${MAXAGE}s in $STORE/.watcher.log — run: ./scripts/resync.sh"
+  fi
+fi
 
 # cortex env parity: Claude gets CORTEX_* via settings.json env; other harnesses
 # (and the codex distill sweep) only see it through the shared env file.
@@ -121,21 +174,91 @@ else
   info "no shared env file ($STORE/env) — optional; created by make install"
 fi
 
-# MCP distribution freshness
-MCP="$STORE/mcp.json"
-if [ -f "$MCP" ]; then
-  STALE=""
-  OC="$HOME/.config/opencode/opencode.jsonc"; [ -f "$OC" ] && [ "$MCP" -nt "$OC" ] && STALE="opencode"
-  for home in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))" 2>/dev/null); do
-    [ -f "$home/config.toml" ] && [ "$MCP" -nt "$home/config.toml" ] && STALE="$STALE codex"
-  done
-  [ -z "$STALE" ] && ok "MCP configs up to date" || bad "mcp.json newer than:$STALE — run: make mcp"
+# MCP distribution: ask the emitter, don't compare mtimes. A harness that
+# rewrites its own config always wins an mtime race, so "newer" never proved
+# "correct" — a real drift (opencode.jsonc missing a whole provider block, but
+# still newer than mcp.json) passed silently under the old check.
+if [ -f "$STORE/mcp.json" ]; then
+  MCPCHECK=$(python3 scripts/port-mcp.py check 2>&1); MCPRC=$?
+  [ "$MCPRC" -eq 0 ] && ok "MCP configs match canonical mcp.json" \
+    || bad "MCP drift — $MCPCHECK"
 fi
 
 # LiteLLM (on-demand service, so absence is informational)
 if [ "$(python3 -c "import json,os;print(json.load(open(os.environ['AGENT_HOME_CONFIG'])).get('litellm',False))" 2>/dev/null)" = "True" ]; then
   if nc -z localhost 4000 2>/dev/null; then ok "LiteLLM responding on :4000"
   else info "LiteLLM not running (start when needed: make litellm)"; fi
+fi
+
+# history freshness — the index should track the newest harness transcript
+# within an hour; a bigger lag means `make history` (or the watcher, which
+# runs it) has stopped picking up new sessions in some harness.
+HIST_LAG=$(python3 - <<'PY' 2>/dev/null
+from pathlib import Path
+import sync
+srcs = []
+claude_dirs = {Path.home() / ".claude", Path.home() / ".claude-work"}
+claude_dirs |= {Path(a["config_dir"]).expanduser() for a in sync._accounts() if a.get("config_dir")}
+for d in claude_dirs:
+    srcs += d.glob("projects/*/*.jsonl")
+for h in sync.codex_homes():
+    srcs += Path(h).glob("sessions/**/*.jsonl")
+db = Path.home() / ".local/share/opencode/opencode.db"
+if db.exists():
+    srcs.append(db)
+hist = sync.CANON / "history"
+idx = list(hist.rglob("*.md")) if hist.exists() else []
+t_src = max((p.stat().st_mtime for p in srcs), default=0)
+t_idx = max((p.stat().st_mtime for p in idx), default=0)
+print(int(t_src - t_idx) if t_src else -1)
+PY
+)
+if [ "${HIST_LAG:--1}" = "-1" ]; then
+  info "history: no harness transcripts found yet"
+elif [ "$HIST_LAG" -gt 3600 ]; then
+  bad "history index is $((HIST_LAG/60))min behind the newest transcript — run: make history"
+else
+  ok "history index tracks the newest harness transcript"
+fi
+
+# handoff staleness — a handoff written before the most recent indexed
+# session is describing state that's already been superseded.
+HANDOFF="$STORE/handoff.md"
+if [ -f "$HANDOFF" ]; then
+  NEWER=$(find "$STORE/history" -name '*.md' -newer "$HANDOFF" 2>/dev/null | head -1)
+  [ -z "$NEWER" ] \
+    && ok "handoff.md: no newer indexed session" \
+    || info "handoff.md predates a newer indexed session (e.g. $NEWER) — may be stale"
+else
+  info "no handoff.md (written by /handoff)"
+fi
+
+# vendored pipeline freshness — the watcher runs from ~/.agent-home/lib (moved
+# out of ~/Documents to clear TCC, see #6); a stale copy means an edit to
+# sync.py or scripts/ hasn't been re-vendored, so the watcher runs old code.
+LIB="$STORE/lib"
+if [ ! -d "$LIB" ]; then
+  info "~/.agent-home/lib not vendored yet (watcher TCC fix, #6) — nothing to check"
+else
+  LIBDRIFT=$(python3 - "$LIB" <<'PY' 2>/dev/null
+import filecmp, sys
+from pathlib import Path
+lib, repo = Path(sys.argv[1]), Path(".")
+srcs = [repo / "sync.py"] + sorted((repo / "scripts").glob("*"))
+drift = []
+for s in srcs:
+    if not s.is_file():
+        continue
+    rel = s.relative_to(repo)
+    dst = lib / rel
+    if not dst.exists() or not filecmp.cmp(s, dst, shallow=False):
+        drift.append(str(rel))
+print(",".join(drift))
+PY
+)
+  [ -z "$LIBDRIFT" ] \
+    && ok "~/.agent-home/lib matches repo sync.py + scripts/" \
+    || bad "~/.agent-home/lib stale: $LIBDRIFT — run: make lib"
 fi
 
 echo

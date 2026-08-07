@@ -45,29 +45,36 @@ def model_alias(name):
         return None
 
 
+def _build(src):
+    """source agent -> (dest path, intended file content). Shared by main()
+    (which writes it) and check() (which diffs it against the live file)."""
+    fields, body = parse_frontmatter(src.read_text())
+    dest = OC_DIR / src.name
+    lines = ["---",
+             f"{MARKER} from {src} — edit the source, then `make agents`",
+             f"description: {json.dumps(fields.get('description', src.stem))}",
+             "mode: subagent"]
+    model = model_alias(fields.get("model", ""))
+    if model:
+        lines.append(f"model: {model}")
+    if fields.get("tools"):
+        allowed = {TOOLS[t.strip()] for t in fields["tools"].split(",") if t.strip() in TOOLS}
+        lines.append("tools:")
+        lines += [f"  {t}: {str(t in allowed).lower()}" for t in sorted(set(TOOLS.values()))]
+    lines += ["---", "", body]
+    return dest, "\n".join(lines)
+
+
 def main():
     src_dir = sync.CANON / "agents"
     OC_DIR.mkdir(parents=True, exist_ok=True)
     generated = set()
     for src in sorted(src_dir.glob("*.md")):
-        fields, body = parse_frontmatter(src.read_text())
-        dest = OC_DIR / src.name
+        dest, content = _build(src)
         if dest.exists() and MARKER not in dest.read_text():
             print(f"  skip {src.name}: hand-written opencode agent exists", file=sys.stderr)
             continue
-        lines = ["---",
-                 f"{MARKER} from {src} — edit the source, then `make agents`",
-                 f"description: {json.dumps(fields.get('description', src.stem))}",
-                 "mode: subagent"]
-        model = model_alias(fields.get("model", ""))
-        if model:
-            lines.append(f"model: {model}")
-        if fields.get("tools"):
-            allowed = {TOOLS[t.strip()] for t in fields["tools"].split(",") if t.strip() in TOOLS}
-            lines.append("tools:")
-            lines += [f"  {t}: {str(t in allowed).lower()}" for t in sorted(set(TOOLS.values()))]
-        lines += ["---", "", body]
-        dest.write_text("\n".join(lines))
+        dest.write_text(content)
         generated.add(dest.name)
         print(f"  {src.stem} -> {dest}")
     # remove generated agents whose source is gone
@@ -78,5 +85,30 @@ def main():
     print(f"opencode agents: {len(generated)} generated")
 
 
+def check():
+    """--check: diff generated agents against their sources without writing
+    anything, plus orphans (source deleted, generated file still present).
+    Returns True if no drift."""
+    src_dir = sync.CANON / "agents"
+    live_names = {s.name for s in src_dir.glob("*.md")}
+    drift = []
+    for src in sorted(src_dir.glob("*.md")):
+        dest, content = _build(src)
+        if dest.exists() and MARKER not in dest.read_text():
+            continue  # hand-written, not ours to check
+        if not dest.exists() or dest.read_text() != content:
+            drift.append(dest.name)
+    if OC_DIR.exists():
+        for f in OC_DIR.glob("*.md"):
+            if f.name not in live_names and MARKER in f.read_text():
+                drift.append(f"{f.name} (orphan)")
+    if drift:
+        print(f"port-agents --check: drift in {drift} — run: make agents")
+    return not drift
+
+
 if __name__ == "__main__":
-    main()
+    if "--check" in sys.argv:
+        sys.exit(0 if check() else 1)
+    else:
+        main()

@@ -9,6 +9,7 @@ harness's native MCP config from it (non-breaking merge).
 
   port-mcp.py adopt      Claude MCP defs -> ~/.agent-home/mcp.json (merge)
   port-mcp.py apply      canonical -> opencode.jsonc + ~/.codex/config.toml (merge)
+  port-mcp.py check      diff live configs against canonical; exit non-zero on drift
   port-mcp.py list       show canonical servers and per-harness portability
 
 Canonical schema (~/.agent-home/mcp.json):
@@ -146,6 +147,8 @@ def _bearer_env_var(headers):
 
 
 def _read_jsonc(p):
+    """Returns {} for a missing file, None for a file that exists but won't parse
+    (distinct cases — None must never be treated as "empty, safe to overwrite")."""
     if not p.exists():
         return {}
     raw = open(p).read()
@@ -155,7 +158,24 @@ def _read_jsonc(p):
     try:
         return json.loads(raw) or {}
     except json.JSONDecodeError:
-        return {}
+        return None
+
+
+def _oc_entry(e):
+    """canonical server entry -> opencode's mcp.<name> shape (the key this
+    emitter owns; shared by generate_opencode and check_opencode so the two
+    can never drift apart from each other)."""
+    if e["transport"] == "stdio":
+        entry = {"type": "local",
+                 "command": [e["command"]] + list(e.get("args", [])),
+                 "enabled": True}
+        if e.get("env"):
+            entry["environment"] = {k: _oc_syntax(v) for k, v in e["env"].items()}
+    else:
+        entry = {"type": "remote", "url": e.get("url"), "enabled": True}
+        if e.get("headers"):
+            entry["headers"] = {k: _oc_syntax(v) for k, v in e["headers"].items()}
+    return entry
 
 
 def generate_opencode():
@@ -165,27 +185,62 @@ def generate_opencode():
     if not servers:
         return
     cfg = _read_jsonc(OPENCODE)
+    if cfg is None:
+        sys.exit(f"port-mcp: {OPENCODE} exists but won't parse as JSONC — "
+                  f"not touching it. Fix the syntax error (or run "
+                  f"scripts/wire-opencode.py, which backs up and rewrites clean).")
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
     mcp = cfg.setdefault("mcp", {})
     for n, e in servers.items():
-        if e["transport"] == "stdio":
-            entry = {"type": "local",
-                     "command": [e["command"]] + list(e.get("args", [])),
-                     "enabled": True}
-            if e.get("env"):
-                entry["environment"] = {k: _oc_syntax(v) for k, v in e["env"].items()}
-        else:
-            entry = {"type": "remote", "url": e.get("url"), "enabled": True}
-            if e.get("headers"):
-                entry["headers"] = {k: _oc_syntax(v) for k, v in e["headers"].items()}
-        mcp[n] = entry
+        mcp[n] = _oc_entry(e)
     OPENCODE.parent.mkdir(parents=True, exist_ok=True)
     json.dump(cfg, open(OPENCODE, "w"), indent=2)
     print(f"opencode: wrote {len(servers)} MCP server(s) into {OPENCODE}")
 
 
+def check_opencode():
+    """--check: diff the mcp.<name> keys this emitter owns against the live
+    file, without writing anything. Returns True if no drift."""
+    servers = load_canon()
+    if not servers:
+        return True
+    cfg = _read_jsonc(OPENCODE)
+    if cfg is None:
+        print(f"opencode --check: {OPENCODE} unparseable as JSONC")
+        return False
+    live = cfg.get("mcp", {})
+    drift = [n for n, e in servers.items() if live.get(n) != _oc_entry(e)]
+    if drift:
+        print(f"opencode --check: drift in mcp.{{{', '.join(drift)}}} — run: make mcp")
+    return not drift
+
+
 def _toml_str(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _codex_block(n, e):
+    """canonical server entry -> the [mcp_servers.<name>] TOML block text this
+    emitter owns (plus is-remote and, for OAuth remotes, the reauth name).
+    Shared by generate_codex and check_codex so the two can't drift apart."""
+    lines = [f"\n[mcp_servers.{n}]"]
+    reauth = None
+    if e["transport"] == "stdio":
+        lines.append(f"command = {_toml_str(e['command'])}")
+        if e.get("args"):
+            lines.append("args = [" + ", ".join(_toml_str(a) for a in e["args"]) + "]")
+        if e.get("env"):
+            inner = ", ".join(f"{k} = {_toml_str(v)}" for k, v in e["env"].items())
+            lines.append("env = { " + inner + " }")
+    else:
+        lines.append(f"url = {_toml_str(e['url'])}")
+        bev = _bearer_env_var(e.get("headers"))
+        if bev:
+            lines.append(f"bearer_token_env_var = {_toml_str(bev)}")
+        else:
+            lines.append('auth = "oauth"')  # Claude-managed OAuth -> re-auth in Codex
+            reauth = n
+    return "\n".join(lines), e["transport"] == "remote", reauth
 
 
 def generate_codex():
@@ -204,24 +259,11 @@ def generate_codex():
     existing = existing.rstrip() + "\n"
     blocks, reauth, has_remote = [], [], False
     for n, e in servers.items():
-        lines = [f"\n[mcp_servers.{n}]"]
-        if e["transport"] == "stdio":
-            lines.append(f"command = {_toml_str(e['command'])}")
-            if e.get("args"):
-                lines.append("args = [" + ", ".join(_toml_str(a) for a in e["args"]) + "]")
-            if e.get("env"):
-                inner = ", ".join(f"{k} = {_toml_str(v)}" for k, v in e["env"].items())
-                lines.append("env = { " + inner + " }")
-        else:
-            has_remote = True
-            lines.append(f"url = {_toml_str(e['url'])}")
-            bev = _bearer_env_var(e.get("headers"))
-            if bev:
-                lines.append(f"bearer_token_env_var = {_toml_str(bev)}")
-            else:
-                lines.append('auth = "oauth"')  # Claude-managed OAuth -> re-auth in Codex
-                reauth.append(n)
-        blocks.append("\n".join(lines))
+        block, is_remote, ra = _codex_block(n, e)
+        has_remote = has_remote or is_remote
+        if ra:
+            reauth.append(ra)
+        blocks.append(block)
     prefix = ""
     if has_remote and "experimental_use_rmcp_client" not in existing:
         if "[features]" in existing:
@@ -234,6 +276,19 @@ def generate_codex():
           + (f"; re-authenticate in Codex: {reauth}" if reauth else ""))
 
 
+def check_codex():
+    """--check: diff the [mcp_servers.<name>] blocks this emitter owns against
+    the live file's text, without writing anything. Returns True if no drift."""
+    servers = load_canon()
+    if not servers:
+        return True
+    existing = CODEX_TOML.read_text() if CODEX_TOML.exists() else ""
+    drift = [n for n, e in servers.items() if _codex_block(n, e)[0] not in existing]
+    if drift:
+        print(f"codex --check: drift in mcp_servers.{{{', '.join(drift)}}} — run: make mcp")
+    return not drift
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
     if cmd == "adopt":
@@ -243,5 +298,8 @@ if __name__ == "__main__":
     elif cmd == "apply":
         generate_opencode()
         generate_codex()
+    elif cmd == "check":
+        oc_ok, cx_ok = check_opencode(), check_codex()  # run both — don't let
+        sys.exit(0 if oc_ok and cx_ok else 1)            # one drift hide the other
     else:
         print(__doc__)

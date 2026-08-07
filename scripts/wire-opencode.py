@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
-"""Non-breaking wiring of opencode.jsonc: MERGE our provider + (optional) plugin
-into whatever config already exists, preserving every other key the user has.
-Usage: wire-opencode.py <claude_in_opencode:true|false>"""
+"""Non-breaking wiring of opencode.jsonc: MERGE our (optional) plugin and skills
+path into whatever config already exists, preserving every other key the user has.
+Model access is native as of opencode >=1.18 (`opencode auth login` for OpenRouter
+and ChatGPT Pro/Plus) — this script does not write a provider block.
+Usage: wire-opencode.py [--check] <claude_in_opencode:true|false>"""
 import json
 import os
 import re
 import sys
 
 DST = os.path.expanduser("~/.config/opencode/opencode.jsonc")
-CIO = len(sys.argv) > 1 and sys.argv[1] == "true"
+CHECK = "--check" in sys.argv
+_argv = [a for a in sys.argv[1:] if a != "--check"]
+CIO = len(_argv) > 0 and _argv[0] == "true"
 
-LITELLM_PROVIDER = {
-    "npm": "@ai-sdk/openai-compatible",
-    "name": "LiteLLM (ChatGPT sub + router)",
-    "options": {"baseURL": "http://localhost:4000/v1"},
-    "models": {
-        "chatgpt/gpt-5.3-codex": {"name": "GPT-5.3 Codex (ChatGPT plan)"},
-        "chatgpt/gpt-5.4": {"name": "GPT-5.4 (ChatGPT plan)"},
-        "chatgpt/gpt-5.4-pro": {"name": "GPT-5.4 Pro (ChatGPT plan)"},
-    },
-}
 PLUGIN = "opencode-claude-auth@latest"
 
 cfg = {}
@@ -37,8 +31,12 @@ if os.path.exists(DST):
         cfg = {}
 
 cfg.setdefault("$schema", "https://opencode.ai/config.json")
-cfg.setdefault("provider", {})
-cfg["provider"]["litellm"] = LITELLM_PROVIDER  # our key; other providers untouched
+
+# owned-key snapshot, taken before we mutate cfg below — this is what --check
+# diffs against (the state the live file was ACTUALLY in, not what we're about
+# to make it).
+live_paths = list(cfg.get("skills", {}).get("paths", []))
+live_plugins = list(cfg.get("plugin", []))
 
 # Shared skill library: opencode's native skill tool scans every dir listed in
 # skills.paths, so pointing it at ~/.agents/skills gives it the same skill set
@@ -56,6 +54,19 @@ if plugins:
 elif "plugin" in cfg:
     del cfg["plugin"]
 
+if CHECK:
+    drift = []
+    if AGENTS_SKILLS not in live_paths:
+        drift.append("skills.paths (missing ~/.agents/skills)")
+    if CIO and PLUGIN not in live_plugins:
+        drift.append(f"plugin (missing {PLUGIN})")
+    if not CIO and PLUGIN in live_plugins:
+        drift.append(f"plugin (stale {PLUGIN}, claude_in_opencode=false)")
+    if drift:
+        sys.exit(f"wire-opencode --check: drift in {DST}: {'; '.join(drift)}")
+    print(f"wire-opencode --check: {DST} OK")
+    sys.exit(0)
+
 os.makedirs(os.path.dirname(DST), exist_ok=True)
 json.dump(cfg, open(DST, "w"), indent=2)
-print(f"  merged provider{' + claude plugin' if CIO else ''} into {DST} (kept your other keys)")
+print(f"  merged skills.paths{' + claude plugin' if CIO else ''} into {DST} (kept your other keys)")

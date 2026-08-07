@@ -120,7 +120,7 @@ json.dump({
   "harnesses": harnesses,
   "adopt_from": [h for h,on in harnesses.items() if on],
   "accounts": accounts,
-  "litellm": True,
+  "litellm": False,
   "claude_in_opencode": False,
 }, open(os.environ["AGENT_HOME_CONFIG"],"w"), indent=2)
 print(f"→ bootstrapped {os.environ['AGENT_HOME_CONFIG']} ({sum(harnesses.values())} harnesses, {len(accounts)} accounts)")
@@ -176,7 +176,7 @@ else
     && ACCT_SPECS+=("openrouter|openai-key|||OPENROUTER_API_KEY|https://openrouter.ai/api/v1|")
   echo
   echo "Step 4/4 — options"
-  LITELLM=false; ask "  set up LiteLLM proxy (ChatGPT sub + OpenRouter + local on :4000)?" y && LITELLM=true
+  LITELLM=false; ask "  set up LiteLLM proxy too (OPTIONAL — opencode/codex already get ChatGPT sub + OpenRouter natively)?" n && LITELLM=true
   CIO=false
   if printf '%s\n' "${TARGETS[@]}" | grep -qx opencode; then
     echo "  ⚠ Reusing a Claude subscription inside opencode violates Anthropic's ToS"
@@ -228,7 +228,7 @@ mkdir -p "$STORE"/{skills,agents,commands,memory,workflows}
 python3 sync.py --adopt
 
 if [ "$(cfg litellm False)" = "True" ]; then
-  echo "== 2. LiteLLM =="
+  echo "== 2. LiteLLM (optional, parked — not the default model path) =="
   command -v litellm >/dev/null 2>&1 || { command -v uv >/dev/null 2>&1 && uv tool install 'litellm[proxy]' || echo "  ! install uv or 'pip install litellm[proxy]'"; }
   echo "  config: $REPO/litellm/config.yaml   (start with 'make litellm')"
 fi
