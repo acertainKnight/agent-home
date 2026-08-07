@@ -5,6 +5,7 @@ decide about X last week?" no matter which harness the conversation happened in.
 
   ./history.py index            (re)index — incremental, skips unchanged sources
   ./history.py search <query>   case-insensitive regex over the indexed history
+  ./history.py latest           newest transcript, any harness -> ~/.agent-home/handoff-auto.md
 
 Sources: Claude Code project transcripts (every account's CLAUDE_CONFIG_DIR),
 Codex CLI session rollouts (every CODEX_HOME), opencode's sqlite store.
@@ -14,6 +15,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -165,10 +167,85 @@ def search(query):
         print(f"no matches for {query!r} in {HIST} (run 'index' first?)")
 
 
+def _opencode_latest_session():
+    """(mtime, header, turns) for the newest opencode session, or None."""
+    db = Path.home() / ".local/share/opencode/opencode.db"
+    if not db.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        row = con.execute(
+            "select m.session_id, max(m.time_created) from message m"
+            " join part p on p.message_id = m.id"
+            " where json_extract(p.data,'$.type')='text' group by m.session_id"
+            " order by 2 desc limit 1").fetchone()
+        if not row:
+            con.close()
+            return None
+        sid, ts_ms = row
+        rows = con.execute(
+            "select json_extract(m.data,'$.role'), p.data from message m"
+            " join part p on p.message_id = m.id"
+            " where m.session_id=? and json_extract(p.data,'$.type')='text'"
+            " order by m.time_created, p.time_created", (sid,)).fetchall()
+        con.close()
+    except sqlite3.Error:
+        return None
+    turns = [(role, json.loads(pdata).get("text", "")) for role, pdata in rows
+             if role in ("user", "assistant") and json.loads(pdata).get("text", "").strip()]
+    return ts_ms / 1000, f"opencode session {sid}", turns
+
+
+def latest():
+    """Newest transcript across every harness -> ~/.agent-home/handoff-auto.md
+    (last ~30 turns, generated-at + source-harness header). Claude Code
+    flushes its transcript live, so this reflects a session still in progress."""
+    candidates = []  # (mtime, header, lazy turns getter) — only the winner reads its content
+
+    claude_dirs = {Path.home() / ".claude", Path.home() / ".claude-work"}
+    claude_dirs |= {Path(a["config_dir"]).expanduser() for a in sync._accounts()
+                    if a.get("provider", "anthropic-sub") == "anthropic-sub" and a.get("config_dir")}
+    for cdir in claude_dirs:
+        for src in cdir.glob("projects/*/*.jsonl"):
+            st = src.stat()
+            if st.st_size > MAX_SRC_BYTES:
+                continue
+            candidates.append((st.st_mtime, f"claude session {src.stem} ({src.parent.name})",
+                                lambda src=src: _jsonl_turns(src, _claude_extract)))
+
+    for home in sync.codex_homes():
+        for src in Path(home).glob("sessions/**/*.jsonl"):
+            st = src.stat()
+            if st.st_size > MAX_SRC_BYTES:
+                continue
+            candidates.append((st.st_mtime, f"codex session {src.stem}",
+                                lambda src=src: _jsonl_turns(src, _codex_extract)))
+
+    oc = _opencode_latest_session()
+    if oc:
+        oc_mtime, oc_header, oc_turns = oc
+        candidates.append((oc_mtime, oc_header, lambda t=oc_turns: t))
+
+    if not candidates:
+        print("history latest: no transcripts found")
+        return
+
+    mtime, header, get_turns = max(candidates, key=lambda c: c[0])
+    turns = get_turns()[-30:]
+    dest = sync.CANON / "handoff-auto.md"
+    lines = [f"# auto-handoff (generated {time.strftime('%F %T')}, source: {header})", ""]
+    for role, text in turns:
+        lines.append(f"**{role}**: {text.strip()[:MAX_TURN_CHARS]}\n")
+    dest.write_text("\n".join(lines))
+    print(f"history latest: {len(turns)} turn(s) from {header} -> {dest}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "search":
         if len(sys.argv) < 3:
             sys.exit("usage: history.py search <query>")
         search(" ".join(sys.argv[2:]))
+    elif len(sys.argv) > 1 and sys.argv[1] == "latest":
+        latest()
     else:
         index()

@@ -6,6 +6,7 @@ your content lives in the ~/.agent-home dot-folder (override with $AGENT_HOME).
 Usage:
   ./sync.py            apply mappings (idempotent)
   ./sync.py --adopt    move existing harness files INTO ~/.agent-home, then link
+  ./sync.py --sweep    safe auto return path (skills/commands only), then link
   ./sync.py --status   show state of every mapping
 """
 import argparse
@@ -74,11 +75,6 @@ def codex_links():
                 (HOME / ".agents/commands", h / "prompts")]
     return out
 
-# Native skill dirs to MERGE into the store on --adopt (skills reach these
-# harnesses via ~/.agents/skills, so we import but don't keep a back-link).
-SKILL_SWEEP = [HOME / ".config/opencode/skills", HOME / ".codex/skills"]
-
-
 def load_config():
     try:
         return json.load(open(CANON / "config.json"))
@@ -113,6 +109,10 @@ SYMLINKS = links_for(target_names())
 
 AGENTS_SKILLS = HOME / ".agents/skills"  # universal skill dir (Codex, opencode, spec default)
 AGENTS_COMMANDS = HOME / ".agents/commands"  # generated command/prompt library
+
+# Native skill dirs to MERGE into the store on sweep/adopt (skills reach these
+# harnesses via ~/.agents/skills, so we import but don't keep a back-link).
+SKILL_SWEEP = [AGENTS_SKILLS, HOME / ".codex/skills"]
 
 
 def _enabled_plugin_roots():
@@ -258,17 +258,10 @@ def merge_into_store(store, src, tag):
         src.unlink()
 
 
-def adopt():
-    """Merge every SOURCE harness's real content into ~/.agent-home (union;
-    nothing lost), then apply() links it all back."""
-    CANON.mkdir(parents=True, exist_ok=True)
-    for src, dst in links_for(source_names()):
-        if dst.is_symlink() or not dst.exists():
-            continue
-        merge_into_store(src, dst, _harness_of(dst))
-    # Native skill dirs that aren't in the link map: import real skills only.
-    # Hidden entries (Codex ships built-ins in .system) and symlinks (our own
-    # generated links) stay put — the dir itself is never deleted.
+def _sweep_skills():
+    """Native skill dirs that aren't in the link map: import real skills only.
+    Hidden entries (Codex ships built-ins in .system) and symlinks (our own
+    generated links) stay put — the dir itself is never deleted."""
     for d in SKILL_SWEEP:
         if not d.is_dir() or d.is_symlink():
             continue
@@ -277,6 +270,37 @@ def adopt():
                 continue
             if (child / "SKILL.md").exists():
                 _merge_item(child, CANON / "skills", _harness_of(child))
+
+
+def _sweep_commands():
+    """A command/prompt authored directly in ~/.agents/commands (a real file,
+    not our generated symlink) merges into the store before build_command_links()
+    regenerates the dir."""
+    for f in list(AGENTS_COMMANDS.glob("*.md")):
+        if not f.is_symlink():
+            _merge_item(f, CANON / "commands", _harness_of(f))
+
+
+def adopt():
+    """Merge every SOURCE harness's real content into ~/.agent-home (union;
+    nothing lost), then apply() links it all back."""
+    CANON.mkdir(parents=True, exist_ok=True)
+    for src, dst in links_for(source_names()):
+        if dst.is_symlink() or not dst.exists():
+            continue
+        merge_into_store(src, dst, _harness_of(dst))
+    _sweep_skills()
+    _sweep_commands()
+
+
+def sweep():
+    """--sweep: the safe automatic return path (run by the watcher). Imports
+    only skills/commands a harness authored directly, never touches a real
+    harness config file the way --adopt's merge_into_store() does."""
+    CANON.mkdir(parents=True, exist_ok=True)
+    _sweep_skills()
+    _sweep_commands()
+    apply()
 
 
 def apply():
@@ -304,6 +328,7 @@ def apply():
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--adopt", action="store_true")
+    p.add_argument("--sweep", action="store_true")
     p.add_argument("--status", action="store_true")
     a = p.parse_args()
     if a.status:
@@ -311,5 +336,7 @@ if __name__ == "__main__":
     elif a.adopt:
         adopt()
         apply()
+    elif a.sweep:
+        sweep()
     else:
         apply()
