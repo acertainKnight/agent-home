@@ -17,10 +17,19 @@ Per plugin, writes ~/.agent-home/plugins/<name>/:
   hooks/ commands/ agents/   copied verbatim, kept as extra files (the AP
                 spec allows them; harness shims reference them)
 
+Every run also (re)generates, from the vendored content above (pure
+derivations — always safe to overwrite, never hand-edited):
+  .claude-plugin/plugin.json   per plugin: name/version/description + "hooks" when shipped
+  .mcp.json                    per plugin: hidden byte-copy of mcp.json, when shipped
+  .codex-plugin/plugin.json    per plugin: name/version/description, skills/mcpServers/hooks paths
+  plugins/.claude-plugin/marketplace.json   store-root Claude marketplace index
+  plugins/.agents/plugins/marketplace.json  store-root Codex marketplace index (format
+                confirmed against `codex plugin list` on the real openai-curated marketplace)
+
 Usage:
-  vendor-plugins.py             vendor every enabled plugin not yet vendored (never overwrites an existing vendored dir)
-  vendor-plugins.py --refresh   compare vendored plugins against the live Claude cache; report drift, write nothing for existing dirs
-  vendor-plugins.py --validate  check every vendored skill's dir name against its SKILL.md `name:` field; report only
+  vendor-plugins.py             vendor every enabled plugin not yet vendored (never overwrites an existing vendored dir), then regenerate shims + marketplaces
+  vendor-plugins.py --refresh   compare vendored plugins against the live Claude cache; report drift, write nothing for existing dirs; still regenerates shims + marketplaces
+  vendor-plugins.py --validate  check every vendored skill's dir name against its SKILL.md `name:` field; report only, no writes
 """
 import json
 import os
@@ -256,10 +265,108 @@ def validate():
     return violations
 
 
+HOOKS_FILENAMES = ("hooks.json", "claude-codex-hooks.json")  # every hook-shipping
+# plugin measured in the cache uses one of these two conventional names
+
+
+def hooks_file(plugin_dir):
+    """Relative path (e.g. "./hooks/hooks.json") to the plugin's Claude/Codex-
+    shared hooks manifest, or None if the plugin ships no hooks file."""
+    hooks_dir = plugin_dir / "hooks"
+    if not hooks_dir.is_dir():
+        return None
+    for fname in HOOKS_FILENAMES:
+        if (hooks_dir / fname).exists():
+            return f"./hooks/{fname}"
+    return None
+
+
+def generate_shim_one(plugin_dir):
+    """Per-plugin harness shims, derived fresh from the vendored plugin.json/
+    mcp.json/skills/hooks every run: .claude-plugin/plugin.json, hidden
+    .mcp.json (byte-copy of mcp.json), .codex-plugin/plugin.json. These are
+    pure derivations, never hand-edited, so regenerating is always safe —
+    unlike vendor_one()'s content, which is never overwritten once vendored."""
+    manifest = _read_json(plugin_dir / "plugin.json")
+    name, version = manifest.get("name"), manifest.get("version")
+    desc = manifest.get("description", "")
+    hooks = hooks_file(plugin_dir)
+    has_skills = (plugin_dir / "skills").is_dir()
+    has_mcp = (plugin_dir / "mcp.json").exists()
+
+    claude = {"name": name, "version": version, "description": desc}
+    if hooks:
+        claude["hooks"] = hooks
+    _write_json(plugin_dir / ".claude-plugin" / "plugin.json", claude)
+
+    if has_mcp:
+        shutil.copy(plugin_dir / "mcp.json", plugin_dir / ".mcp.json")
+
+    codex = {"name": name, "version": version, "description": desc}
+    if has_skills:
+        codex["skills"] = "./skills/"
+    if has_mcp:
+        codex["mcpServers"] = "./.mcp.json"
+    if hooks:
+        codex["hooks"] = hooks
+    _write_json(plugin_dir / ".codex-plugin" / "plugin.json", codex)
+
+
+def _vendored_plugins():
+    if not PLUGINS_DIR.is_dir():
+        return []
+    return sorted(p for p in PLUGINS_DIR.iterdir() if p.is_dir() and (p / "plugin.json").exists())
+
+
+def generate_shims_all():
+    plugins = _vendored_plugins()
+    for p in plugins:
+        generate_shim_one(p)
+    print(f"generated harness shims for {len(plugins)} plugin(s)")
+
+
+def generate_marketplaces():
+    """Two marketplace indexes at the store root: .claude-plugin/marketplace.json
+    (Claude's format — see any marketplace under ~/.claude/plugins/marketplaces/)
+    and .agents/plugins/marketplace.json (the Agent Plugins format Codex reads —
+    confirmed against the real openai-curated marketplace at
+    ~/.codex/.tmp/plugins/.agents/plugins/marketplace.json, whose entries
+    `codex plugin list` resolves correctly)."""
+    plugins = _vendored_plugins()
+    claude_entries, codex_entries = [], []
+    for p in plugins:
+        m = _read_json(p / "plugin.json")
+        claude_entries.append({
+            "name": m.get("name"),
+            "description": m.get("description", ""),
+            "source": f"./{p.name}",
+        })
+        codex_entries.append({
+            "name": m.get("name"),
+            "source": {"source": "local", "path": f"./{p.name}"},
+            "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+        })
+    _write_json(PLUGINS_DIR / ".claude-plugin" / "marketplace.json", {
+        "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+        "name": "agent-home",
+        "description": "Vendored plugin store, owned by ~/.agent-home.",
+        "owner": {"name": "agent-home"},
+        "plugins": claude_entries,
+    })
+    _write_json(PLUGINS_DIR / ".agents" / "plugins" / "marketplace.json", {
+        "name": "agent-home",
+        "interface": {"displayName": "agent-home"},
+        "plugins": codex_entries,
+    })
+    print(f"generated marketplace indexes ({len(plugins)} plugins)")
+
+
 if __name__ == "__main__":
+    if "--validate" in sys.argv:
+        sys.exit(1 if validate() else 0)
     if "--refresh" in sys.argv:
         refresh()
-    elif "--validate" in sys.argv:
-        sys.exit(1 if validate() else 0)
     else:
         vendor_all()
+    generate_shims_all()
+    generate_marketplaces()

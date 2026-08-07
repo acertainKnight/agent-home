@@ -89,10 +89,83 @@ def test_validate_reports_dir_mismatch():
     shutil.rmtree(tmp)
 
 
+def test_hooks_file():
+    tmp = Path(tempfile.mkdtemp())
+    p = tmp / "plugin"
+    assert vp.hooks_file(p) is None  # no hooks/ dir at all
+    w(p / "hooks" / "hooks.json", "{}")
+    assert vp.hooks_file(p) == "./hooks/hooks.json"
+    shutil.rmtree(tmp)
+    p2 = tmp / "plugin2"
+    w(p2 / "hooks" / "claude-codex-hooks.json", "{}")  # ponytail's naming
+    assert vp.hooks_file(p2) == "./hooks/claude-codex-hooks.json"
+    shutil.rmtree(tmp)
+
+
+def test_generate_shim_one_fixes_known_defect():
+    """The KNOWN DEFECT from issue #13: a plugin that ships hooks/hooks.json
+    must get a REAL "hooks" reference in .codex-plugin/plugin.json, not an
+    empty {} (measured on superpowers' real upstream .codex-plugin)."""
+    tmp = Path(tempfile.mkdtemp())
+    plugin_dir = tmp / "superpowers-like"
+    w(plugin_dir / "skills" / "s" / "SKILL.md", "---\nname: s\n---\nbody")
+    w(plugin_dir / "hooks" / "hooks.json", '{"hooks": {"SessionStart": []}}')
+    vp._write_json(plugin_dir / "plugin.json", {"name": "superpowers-like", "version": "1.0.0", "description": "d"})
+
+    vp.generate_shim_one(plugin_dir)
+
+    claude = json.loads((plugin_dir / ".claude-plugin" / "plugin.json").read_text())
+    assert claude["hooks"] == "./hooks/hooks.json", claude
+    codex = json.loads((plugin_dir / ".codex-plugin" / "plugin.json").read_text())
+    assert codex["hooks"] == "./hooks/hooks.json", codex  # not {} — the fixed defect
+    assert codex["skills"] == "./skills/"
+    assert "mcpServers" not in codex  # no .mcp.json shipped -> no key
+    assert not (plugin_dir / ".mcp.json").exists()
+    shutil.rmtree(tmp)
+
+
+def test_generate_shim_one_mcp_byte_copy():
+    tmp = Path(tempfile.mkdtemp())
+    plugin_dir = tmp / "mcp-plugin"
+    vp._write_json(plugin_dir / "plugin.json", {"name": "mcp-plugin", "version": "1.0.0", "description": "d"})
+    vp._write_json(plugin_dir / "mcp.json", {"mcpServers": {"x": {"type": "http", "url": "https://x"}}})
+
+    vp.generate_shim_one(plugin_dir)
+
+    assert (plugin_dir / "mcp.json").read_bytes() == (plugin_dir / ".mcp.json").read_bytes()
+    codex = json.loads((plugin_dir / ".codex-plugin" / "plugin.json").read_text())
+    assert codex["mcpServers"] == "./.mcp.json"
+    assert "hooks" not in codex  # no hooks shipped -> no key
+    shutil.rmtree(tmp)
+
+
+def test_generate_marketplaces():
+    tmp = Path(tempfile.mkdtemp())
+    vp.PLUGINS_DIR = tmp / "plugins"
+    for name in ("alpha", "beta"):
+        vp._write_json(vp.PLUGINS_DIR / name / "plugin.json",
+                        {"name": name, "version": "1.0.0", "description": f"{name} plugin"})
+
+    vp.generate_marketplaces()
+
+    claude_mp = json.loads((vp.PLUGINS_DIR / ".claude-plugin" / "marketplace.json").read_text())
+    assert [p["name"] for p in claude_mp["plugins"]] == ["alpha", "beta"]
+    assert claude_mp["plugins"][0]["source"] == "./alpha"
+
+    codex_mp = json.loads((vp.PLUGINS_DIR / ".agents" / "plugins" / "marketplace.json").read_text())
+    assert [p["name"] for p in codex_mp["plugins"]] == ["alpha", "beta"]
+    assert codex_mp["plugins"][0]["source"] == {"source": "local", "path": "./alpha"}
+    shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     test_normalize_mcp()
     test_resolve_version()
     test_skill_name()
     test_vendor_one_and_never_overwrite()
     test_validate_reports_dir_mismatch()
+    test_hooks_file()
+    test_generate_shim_one_fixes_known_defect()
+    test_generate_shim_one_mcp_byte_copy()
+    test_generate_marketplaces()
     print("vendor-plugins self-check: PASS")
