@@ -115,13 +115,40 @@ AGENTS_COMMANDS = HOME / ".agents/commands"  # generated command/prompt library
 SKILL_SWEEP = [AGENTS_SKILLS, HOME / ".codex/skills"]
 
 
-def _enabled_plugin_roots():
+PLUGINS_DIR = CANON / "plugins"  # vendored plugin bytes (scripts/vendor-plugins.py)
+ENABLED_FILE = PLUGINS_DIR / "enabled.json"  # store-owned enabled/disabled list
+
+
+def _seed_enabled():
+    """One-time migration: write ~/.agent-home/plugins/enabled.json from
+    Claude's current enabledPlugins (short name only), if it doesn't exist yet.
+    After this the store owns the enabled list — Claude's settings.json is
+    never read again. Missing/unreadable Claude config seeds an empty file
+    (nothing enabled) rather than failing; a real seed from a live Claude
+    profile can be re-run any time by deleting enabled.json."""
     try:
-        inst = json.load(open(HOME / ".claude/plugins/installed_plugins.json"))["plugins"]
-        enabled = json.load(open(HOME / ".claude/settings.json")).get("enabledPlugins", {})
-    except (OSError, KeyError, json.JSONDecodeError):
+        claude_enabled = json.load(open(HOME / ".claude/settings.json")).get("enabledPlugins", {})
+    except (OSError, json.JSONDecodeError):
+        claude_enabled = {}
+    seeded = {name.partition("@")[0]: True for name, on in claude_enabled.items() if on}
+    ENABLED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(seeded, open(ENABLED_FILE, "w"), indent=2)
+    return seeded
+
+
+def _enabled_plugin_roots():
+    """Vendored plugin dirs (~/.agent-home/plugins/<name>/) whose short name is
+    ON in the store-owned enabled list. Reads only the store — never
+    ~/.claude/~/.claude-work — except once, to seed the enabled list (see
+    _seed_enabled) if it doesn't exist yet."""
+    if not PLUGINS_DIR.is_dir():
         return []
-    return [Path(entries[0]["installPath"]) for name, entries in inst.items() if enabled.get(name)]
+    try:
+        enabled = json.load(open(ENABLED_FILE)) if ENABLED_FILE.exists() else _seed_enabled()
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [d for d in sorted(PLUGINS_DIR.iterdir())
+            if d.is_dir() and enabled.get(d.name) and (d / "plugin.json").exists()]
 
 
 def enabled_plugin_skill_dirs():
@@ -142,6 +169,17 @@ def enabled_plugin_command_files():
         cmds = root / "commands"
         if cmds.is_dir():
             out += sorted(cmds.rglob("*.md"))
+    return out
+
+
+def enabled_plugin_agent_dirs():
+    """Subagent markdown shipped by ENABLED plugins (feature-dev, plugin-dev,
+    self-optimize ship agents/) — modeled on enabled_plugin_command_files()."""
+    out = []
+    for root in _enabled_plugin_roots():
+        agents = root / "agents"
+        if agents.is_dir():
+            out += sorted(agents.rglob("*.md"))
     return out
 
 
