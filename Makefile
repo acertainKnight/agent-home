@@ -1,6 +1,6 @@
 # agent-home — `make install` runs the full guided setup walkthrough.
 ACCOUNT ?= personal
-.PHONY: help install login sync lib status verify test litellm mcp doctor quota history agents watcher
+.PHONY: help install login sync lib status verify test litellm mcp doctor quota history agents watcher plugins plugins-refresh
 .DEFAULT_GOAL := help
 
 help:  ## show this help
@@ -32,6 +32,12 @@ verify:  ## prove an account runs on membership, not API credits (ACCOUNT=name)
 
 test:  ## run the merge-engine self-check
 	@python3 test_merge.py
+
+plugins:  ## vendor enabled Claude plugins into ~/.agent-home/plugins (never overwrites an already-vendored plugin)
+	@python3 scripts/vendor-plugins.py
+
+plugins-refresh:  ## report vendored plugins that drifted from the live Claude cache; writes nothing for existing dirs
+	@python3 scripts/vendor-plugins.py --refresh
 
 litellm:  ## OPTIONAL, parked: LiteLLM router (:4000), retired as the default model path 2026-08-06 — opencode/codex use native auth now
 	@litellm --config litellm/config.yaml
