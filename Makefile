@@ -1,6 +1,6 @@
 # agent-home — `make install` runs the full guided setup walkthrough.
 ACCOUNT ?= personal
-.PHONY: help install login sync status verify test litellm mcp doctor quota history agents watcher
+.PHONY: help install login sync lib status verify test litellm mcp doctor quota history agents watcher
 .DEFAULT_GOAL := help
 
 help:  ## show this help
@@ -12,8 +12,11 @@ install:  ## full walkthrough: pick harnesses, merge, wire, log in accounts
 login:  ## log in & verify every account in config.json
 	@./install.sh --login
 
-sync:  ## re-merge the store into all harnesses (after adding a skill/plugin)
+sync: lib  ## re-merge the store into all harnesses (after adding a skill/plugin)
 	@python3 sync.py --adopt
+
+lib:  ## vendor sync.py + scripts/ into the store (outside TCC's ~/Documents block, for the watcher)
+	@./scripts/vendor-lib.sh
 
 resync:  ## everything: sync + mcp + agents + history + codex distill (what the watcher runs)
 	@./scripts/resync.sh
@@ -30,7 +33,7 @@ verify:  ## prove an account runs on membership, not API credits (ACCOUNT=name)
 test:  ## run the merge-engine self-check
 	@python3 test_merge.py
 
-litellm:  ## start the LiteLLM router (:4000) — device-code login on first use
+litellm:  ## OPTIONAL, parked: LiteLLM router (:4000), retired as the default model path 2026-08-06 — opencode/codex use native auth now
 	@litellm --config litellm/config.yaml
 
 doctor:  ## health-check everything: links, tokens, MCP freshness, env wiring

@@ -30,7 +30,7 @@ verify account="personal":
 test:
     python3 test_merge.py
 
-# start the LiteLLM router (:4000) — device-code login on first use
+# OPTIONAL, parked: LiteLLM router (:4000), retired as the default model path 2026-08-06 — opencode/codex use native auth now
 litellm:
     litellm --config litellm/config.yaml
 
