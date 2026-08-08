@@ -11,21 +11,34 @@ with your ChatGPT account (`codex login`, `forced_login_method = "chatgpt"`).
 Usage draws on plan limits (rolling 5-hour window), zero per-token billing.
 [help.openai.com/articles/11369540, developers.openai.com/codex/auth]
 
-**Anthropic: no sanctioned third-party path.** Claude Pro/Max OAuth tokens are
-restricted to official Anthropic clients. Anthropic began enforcing against
-unofficial OAuth wrappers ~Jan 2026 (legal/compliance clarification Feb 19 2026;
-opencode issue #6930 "…violates ToS & Results in Ban"). The community plugins
-(opencode-anthropic-auth, opencode-claude-auth ~1.1k★, opencode-with-claude)
-work but their own READMEs warn of bans, especially for automated/heavy loops.
-**Default: Claude stays in Claude Code (`claude_in_opencode: false`).** It's an
-explicit per-user opt-in to reuse a Claude subscription in opencode (via
-opencode-claude-auth). Nick has opted in for his own account; teammates decide
-for themselves. Keep it to light interactive use — no automated loops.
+**Anthropic: third-party subscription use REINSTATED (verified 2026-08-07).**
+History, because this flip-flopped twice: Jan 2026 server-side blocks on
+subscription OAuth outside official clients; Feb 19 2026 formal ToS
+restriction; Apr 4 2026 full cut-off of subscriptions in third-party agents
+(opencode issue #6930 "…violates ToS & Results in Ban", now closed). Then
+May 2026: Anthropic reinstated third-party agent usage on Claude
+subscriptions, announcing a metered model — agents draw a separate monthly
+credit pool ($20–$200 by plan tier) billed at API list rates. Jun 2026: that
+billing change was deferred; Agent-SDK-based third-party apps work on
+subscriptions as before, with advance notice promised before the meter lands.
+opencode re-added its native "Log in with Anthropic" accordingly, and a live
+probe on this machine (2026-08-07, `opencode run -m anthropic/claude-haiku-4-5`
+on the Max OAuth credential) was accepted with no restriction error.
+**Current posture: opencode's native Anthropic login is fine to use.** Two
+caveats: (1) when the deferred credit-pool billing activates, third-party
+usage stops drawing the flat Max quota and starts consuming a separate
+metered allowance at API rates — re-evaluate economics then; (2) this policy
+has reversed twice in six months, so Claude Code stays the primary Max
+consumer and heavy automated loops stay in official clients.
+Sources: venturebeat.com (cut-off + reinstatement pieces), zed.dev/blog/
+anthropic-subscription-changes, theregister.com 2026-05-14.
 
 ## The architecture
 
 ```
-Claude Max ──── Claude Code (official client; personal + work config dirs)
+Claude Max ─┬── Claude Code (official client; personal + work config dirs)
+            └── opencode native "Log in with Anthropic" (reinstated May/Jun 2026;
+                metered credit-pool billing announced but deferred — see above)
 ChatGPT sub ─┬─ Codex CLI (official `codex login`)            ← zero risk
              └─ LiteLLM `chatgpt/` provider (device-code OAuth) ← gray zone, no
                 │                                    documented enforcement
