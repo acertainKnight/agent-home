@@ -23,6 +23,6 @@
 
   "litellm": true,
 
-  "_claude_in_opencode": "OPT-IN, BAN RISK. Reuse a Claude subscription inside opencode via opencode-claude-auth. Anthropic restricts subscription tokens to official clients (bans since Jan 2026). false = Claude stays in Claude Code only (recommended for team use).",
+  "_claude_in_opencode": "LEGACY, keep false. Old shim (opencode-claude-auth) from the Jan-Apr 2026 blocked era. Anthropic reinstated third-party subscription use May/Jun 2026 — use opencode's native `opencode auth login` -> Anthropic instead. Code kept; installer no longer offers this.",
   "claude_in_opencode": false
 }

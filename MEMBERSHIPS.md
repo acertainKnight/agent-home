@@ -50,8 +50,10 @@ Local (Ollama/LM Studio) ── opencode + Codex CLI built-in provider IDs
 - **"Run both memberships from one harness"**: Codex CLI is that harness today —
   ChatGPT login natively, plus `model_providers` pointing at any
   OpenAI-compatible endpoint (OpenRouter, LiteLLM, Ollama, LM Studio).
-  opencode is the same once LiteLLM fronts the ChatGPT subscription.
-  Claude Max can only join via ToS-violating shims — excluded by choice.
+  opencode matches it natively (`opencode auth login`: OpenRouter, ChatGPT
+  plan, and — since the May/June 2026 reinstatement — Anthropic Pro/Max).
+  The LiteLLM router and the opencode-claude-auth shim are both legacy
+  workarounds from the blocked era: code kept, nothing wired.
 - **LiteLLM** (installed via `uv tool install 'litellm[proxy]'`) is the mixing
   board: `chatgpt/*` models on subscription OAuth, `openrouter/*` and local
   models by key/no-auth, one endpoint at `http://localhost:4000`. Config:

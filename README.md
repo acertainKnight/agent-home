@@ -147,27 +147,34 @@ without running a local router.
 
 - **Codex CLI** signs into your **ChatGPT account** officially (`codex login`).
   Fully sanctioned.
-- **opencode** (>=1.18) logs into OpenRouter and your **ChatGPT Pro/Plus**
-  plan natively with `opencode auth login`; both land as entries in
-  `~/.local/share/opencode/auth.json`, and `make doctor` checks for them.
-  Separately — and only if `claude_in_opencode: true` — it reuses your Claude
-  Code login via the `opencode-claude-auth` plugin. **Verified working on
-  this machine**: opencode ran `claude-haiku` through the Max membership with
-  no API key present.
+- **opencode** (>=1.18) logs into OpenRouter, your **ChatGPT Pro/Plus** plan,
+  and your **Anthropic Pro/Max** plan natively with `opencode auth login`;
+  each lands as an entry in `~/.local/share/opencode/auth.json`, and
+  `make doctor` checks for them. The Anthropic login is sanctioned again —
+  Anthropic reinstated third-party subscription use in May/June 2026 (a
+  metered credit-pool billing model was announced, then deferred with advance
+  notice promised; dated history in MEMBERSHIPS.md). **Verified on this
+  machine 2026-08-07**: opencode ran `claude-haiku-4-5` on the Max login with
+  no restriction error.
 - **LiteLLM** (`litellm/config.yaml`) is parked history, not wired into
   either harness. It was the router that fronted `chatgpt/*` and
   `openrouter/*` on one local endpoint before opencode and Codex gained
   native auth (retired 2026-08-06); `make litellm` still starts it manually
   if you want a local OpenAI-compatible endpoint for something else.
 
-### ⚠ Claude subscription in non-Anthropic harnesses = ban risk
+### Claude subscription outside Claude Code — sanctioned again (2026-08-07)
 
-`claude_in_opencode` defaults to **false** for exactly this reason. Anthropic's
-ToS restricts Pro/Max subscription OAuth to official clients, and they have
-enforced with account suspensions since Jan 2026 (heavy/automated loops are the
-documented trigger). The `opencode-claude-auth` route works today but is
-unsanctioned. Turn it on only for your own account with eyes open; leave it off
-for shared/team installs. Full sourcing in MEMBERSHIPS.md.
+Anthropic blocked subscription OAuth in third-party tools from Jan 2026 and cut
+it fully on Apr 4, then **reinstated it in May/June 2026** (with a metered
+credit-pool billing model announced but deferred — MEMBERSHIPS.md carries the
+dated history and sources). The supported path is opencode's **native**
+`opencode auth login` → Anthropic. The old `opencode-claude-auth` shim behind
+`claude_in_opencode` is therefore legacy: the code stays (wire-opencode.py
+still honors the flag, and removes the shim plugin when it's false), but the
+installer no longer offers it and it should stay `false`. Two standing
+cautions: keep heavy automated loops in Claude Code, and re-check the
+economics when the deferred credit-pool billing activates (third-party usage
+will then draw a metered allowance at API rates, not the flat Max quota).
 
 ### Multiple accounts (Claude, ChatGPT, or any provider)
 

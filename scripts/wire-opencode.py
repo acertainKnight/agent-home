@@ -3,6 +3,9 @@
 path into whatever config already exists, preserving every other key the user has.
 Model access is native as of opencode >=1.18 (`opencode auth login` for OpenRouter
 and ChatGPT Pro/Plus) — this script does not write a provider block.
+claude_in_opencode is LEGACY (blocked-era shim): native `opencode auth login`
+-> Anthropic replaced it after the May/Jun 2026 reinstatement. false (the
+default) also removes a stale shim plugin entry from the live config.
 Usage: wire-opencode.py [--check] <claude_in_opencode:true|false>"""
 import json
 import os

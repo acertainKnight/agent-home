@@ -83,6 +83,9 @@ PY
     python3 -c "import json,sys;a=json.load(open('$OC_AUTH'));sys.exit(0 if any(k in a for k in ('openai','chatgpt')) else 1)" 2>/dev/null \
       && ok "opencode: ChatGPT-plan native auth present" \
       || info "opencode: no ChatGPT-plan login (optional — opencode auth login)"
+    python3 -c "import json,sys;sys.exit(0 if 'anthropic' in json.load(open('$OC_AUTH')) else 1)" 2>/dev/null \
+      && ok "opencode: Anthropic native auth present (sanctioned since May/Jun 2026 — see MEMBERSHIPS.md)" \
+      || info "opencode: no Anthropic login (optional — opencode auth login; native flow, no shim)"
   else
     bad "opencode: no $OC_AUTH — run: opencode auth login"
   fi
@@ -217,7 +220,7 @@ fi
 # LiteLLM (on-demand service, so absence is informational)
 if [ "$(python3 -c "import json,os;print(json.load(open(os.environ['AGENT_HOME_CONFIG'])).get('litellm',False))" 2>/dev/null)" = "True" ]; then
   if nc -z localhost 4000 2>/dev/null; then ok "LiteLLM responding on :4000"
-  else info "LiteLLM not running (start when needed: make litellm)"; fi
+  else info "LiteLLM parked (legacy workaround; native auth covers all memberships)"; fi
 fi
 
 # history freshness — the index should track the newest harness transcript

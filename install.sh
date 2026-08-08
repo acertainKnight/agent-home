@@ -179,13 +179,14 @@ else
     && ACCT_SPECS+=("openrouter|openai-key|||OPENROUTER_API_KEY|https://openrouter.ai/api/v1|")
   echo
   echo "Step 4/4 — options"
-  LITELLM=false; ask "  set up LiteLLM proxy too (OPTIONAL — opencode/codex already get ChatGPT sub + OpenRouter natively)?" n && LITELLM=true
+  # Native logins cover every membership now: Codex `codex login` (ChatGPT),
+  # opencode `opencode auth login` (OpenRouter, ChatGPT plan, AND Anthropic
+  # Pro/Max — Anthropic reinstated third-party subscription use May/Jun 2026,
+  # see MEMBERSHIPS.md). The old workarounds (LiteLLM router, the
+  # opencode-claude-auth shim behind claude_in_opencode) are kept as code but
+  # no longer offered here; both flags stay settable by hand in config.json.
+  LITELLM=false
   CIO=false
-  if printf '%s\n' "${TARGETS[@]}" | grep -qx opencode; then
-    echo "  ⚠ Reusing a Claude subscription inside opencode violates Anthropic's ToS"
-    echo "    (subscription OAuth is for official clients; bans enforced since 2026)."
-    ask "  enable Claude-in-opencode anyway?" n && CIO=true
-  fi
   printf '%s\n' "${ACCT_SPECS[@]}" | python3 - "$LITELLM" "$CIO" "${SOURCES[*]}" "${TARGETS[*]}" <<'PY'
 import json, sys, os
 litellm, cio, sources, targets = sys.argv[1]=="true", sys.argv[2]=="true", sys.argv[3].split(), sys.argv[4].split()
