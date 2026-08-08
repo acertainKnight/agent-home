@@ -1,16 +1,34 @@
 #!/usr/bin/env python3
-"""Translate Claude-format subagents (~/.agent-home/agents/*.md) into opencode's
-agent format (~/.config/opencode/agent/*.md). The mapping is mechanical:
-description carries over, `tools:` becomes opencode's boolean map, `model:`
-resolves through ~/.agent-home/models.json aliases (dropped if unmapped —
-opencode then uses its default model).
+"""Port subagents across harnesses. Claude markdown+frontmatter
+(~/.agent-home/agents/*.md) is canonical; this script:
 
-Idempotent: generated files carry a marker comment and are regenerated each
-run; a same-named file WITHOUT the marker is yours and is never touched.
-Orphans (source agent deleted) are removed.
+  - translates it to opencode's agent format (~/.config/opencode/agent/*.md)
+  - translates it to Codex's [agents.<key>] tables, written into every
+    codex_home's config.toml (Codex has no ~/.codex/agents/ convention —
+    confirmed by a live smoke test, see issue #20 — subagent roles live as
+    tables in config.toml itself, same file as [mcp_servers.*])
+  - imports agents authored directly IN a harness back into the store, before
+    each run's generation, so a hand-authored role round-trips everywhere
+
+The source set for generation is the union of store agents
+(~/.agent-home/agents/*.md) and agents shipped by ENABLED plugins
+(sync.enabled_plugin_agent_dirs()) — store wins on a name collision.
+
+Only name/description/developer_instructions are written to Codex.
+model/model_reasoning_effort/sandbox_mode are NOT emitted: they were not
+confirmed against a logged-in Codex session (see issue #20's smoke-test
+comment) and Claude's per-tool allowlists have no verified sandbox_mode
+mapping yet — see README's Agents row.
+
+Idempotent: generated files/blocks carry a marker and are regenerated each
+run; a same-named artifact WITHOUT the marker is hand-authored and is never
+overwritten by generation — it's imported into the store instead. Orphans
+(source agent deleted) are removed.
 """
 import json
+import re
 import sys
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -45,6 +63,21 @@ def model_alias(name):
         return None
 
 
+def all_source_agents():
+    """name -> Path, union of store agents and agents shipped by ENABLED
+    plugins (wires sync.enabled_plugin_agent_dirs(), added in #14). Store
+    wins on a name collision, matching build_skill_links()/build_command_links()
+    in sync.py."""
+    seen = {}
+    for f in sorted(sync.CANON.glob("agents/*.md")):
+        seen.setdefault(f.stem, f)
+    for f in sync.enabled_plugin_agent_dirs():
+        seen.setdefault(Path(f).stem, Path(f))
+    return seen
+
+
+# ---------------------------------------------------------------- opencode --
+
 def _build(src):
     """source agent -> (dest path, intended file content). Shared by main()
     (which writes it) and check() (which diffs it against the live file)."""
@@ -65,43 +98,177 @@ def _build(src):
     return dest, "\n".join(lines)
 
 
+def import_opencode_agents():
+    """Opencode agent files without MARKER (hand-authored) -> Claude markdown
+    in the store. Tool-allowlist round-trip is skipped (opencode's nested
+    `tools:` mapping isn't parsed by parse_frontmatter, which only reads
+    single-line values) — only description/model/body import."""
+    if not OC_DIR.is_dir():
+        return 0
+    existing_names = {p.stem for p in sync.CANON.glob("agents/*.md")}
+    imported = 0
+    for f in sorted(OC_DIR.glob("*.md")):
+        text = f.read_text()
+        if MARKER in text or f.stem in existing_names:
+            continue
+        fields, body = parse_frontmatter(text)
+        lines = ["---", f"name: {f.stem}",
+                 f"description: {fields.get('description', f.stem)}"]
+        if fields.get("model"):
+            lines.append(f"model: {fields['model']}")
+        lines += ["---", "", body.strip()]
+        dest = sync.CANON / "agents" / f"{f.stem}.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("\n".join(lines) + "\n")
+        existing_names.add(f.stem)
+        imported += 1
+        print(f"  imported opencode agent '{f.stem}' -> {dest}")
+    return imported
+
+
+# -------------------------------------------------------------------- codex --
+
+def _toml_str(s):
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
+def _codex_agent_block(name, src):
+    """canonical source agent -> the `MARKER` comment + [agents.<name>] TOML
+    block text this emitter owns. Shared by generate + check so they can't
+    drift apart, same pattern as port-mcp.py's _codex_block()."""
+    fields, body = parse_frontmatter(src.read_text())
+    desc = fields.get("description", name)
+    lines = [f"\n{MARKER} from {src} — edit the source, then `make agents` "
+             f"(model/sandbox_mode omitted: unverified against a logged-in Codex session, see #20)",
+             f"[agents.{name}]",
+             f"name = {_toml_str(name)}",
+             f"description = {_toml_str(desc)}",
+             f"developer_instructions = {_toml_str(body.strip())}"]
+    return "\n".join(lines)
+
+
+def generate_codex_agents(sources):
+    """Write [agents.<name>] tables into every codex_home's config.toml.
+    Idempotent: for each name in `sources`, drops any existing block for that
+    exact name (MARKER-prefixed or not — a name in `sources` was either
+    already ours, or just re-homed into the store by import_codex_agents() in
+    this same pass, so either way the old block is superseded) then re-emits
+    it fresh and marked. A block for a name NOT in `sources` — genuinely
+    foreign, un-imported — is left completely untouched."""
+    counts = {}
+    for home in sync.codex_homes():
+        toml_path = Path(home) / "config.toml"
+        existing = toml_path.read_text() if toml_path.exists() else ""
+        for name in sources:
+            existing = re.sub(
+                r"(?ms)^(?:" + re.escape(MARKER) + r"[^\n]*\n)?\[agents\." + re.escape(name) + r"\].*?(?=^\[|\Z)",
+                "", existing)
+        existing = existing.rstrip() + "\n"
+        blocks = [_codex_agent_block(name, src) for name, src in sorted(sources.items())]
+        toml_path.parent.mkdir(parents=True, exist_ok=True)
+        toml_path.write_text(existing.rstrip() + "\n" + "\n".join(blocks) + "\n")
+        counts[str(toml_path)] = len(blocks)
+    return counts
+
+
+def _marked_codex_agent_names(text):
+    """Names of [agents.<name>] tables directly preceded by our MARKER
+    comment line — the ones generate_codex_agents() owns."""
+    names = set()
+    for m in re.finditer(r"(?m)^\[agents\.([^\]]+)\]", text):
+        prev = text[:m.start()].rstrip("\n")
+        last_line = prev.splitlines()[-1] if prev else ""
+        if last_line.startswith(MARKER):
+            names.add(m.group(1))
+    return names
+
+
+def import_codex_agents():
+    """[agents.<key>] tables NOT preceded by MARKER (hand-authored directly in
+    Codex) -> Claude markdown in the store. Runs before generation each pass,
+    so a role authored in Codex round-trips to opencode and back into Codex
+    (now marked) within the same invocation."""
+    existing_names = {p.stem for p in sync.CANON.glob("agents/*.md")}
+    imported = 0
+    for home in sync.codex_homes():
+        toml_path = Path(home) / "config.toml"
+        if not toml_path.exists():
+            continue
+        text = toml_path.read_text()
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            continue
+        marked = _marked_codex_agent_names(text)
+        for name, table in data.get("agents", {}).items():
+            if name in marked or name in existing_names:
+                continue
+            lines = ["---", f"name: {name}",
+                     f"description: {table.get('description', name)}"]
+            if table.get("model"):
+                lines.append(f"model: {table['model']}")
+            lines += ["---", "", str(table.get("developer_instructions", "")).strip()]
+            dest = sync.CANON / "agents" / f"{name}.md"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("\n".join(lines) + "\n")
+            existing_names.add(name)
+            imported += 1
+            print(f"  imported codex agent '{name}' ({toml_path}) -> {dest}")
+    return imported
+
+
+# --------------------------------------------------------------------- main --
+
 def main():
-    src_dir = sync.CANON / "agents"
+    imported = import_codex_agents() + import_opencode_agents()
+    sources = all_source_agents()  # after import: freshly-imported roles generate back out too
+
     OC_DIR.mkdir(parents=True, exist_ok=True)
     generated = set()
-    for src in sorted(src_dir.glob("*.md")):
+    for name, src in sorted(sources.items()):
         dest, content = _build(src)
         if dest.exists() and MARKER not in dest.read_text():
             print(f"  skip {src.name}: hand-written opencode agent exists", file=sys.stderr)
             continue
         dest.write_text(content)
         generated.add(dest.name)
-        print(f"  {src.stem} -> {dest}")
-    # remove generated agents whose source is gone
+        print(f"  {name} -> {dest}")
     for f in OC_DIR.glob("*.md"):
         if f.name not in generated and MARKER in f.read_text():
             f.unlink()
             print(f"  removed orphan {f.name}")
     print(f"opencode agents: {len(generated)} generated")
 
+    for toml_path, n in generate_codex_agents(sources).items():
+        print(f"codex ({toml_path}): {n} agents")
+
+    if imported:
+        print(f"imported {imported} hand-authored agent(s) into the store")
+
 
 def check():
-    """--check: diff generated agents against their sources without writing
-    anything, plus orphans (source deleted, generated file still present).
-    Returns True if no drift."""
-    src_dir = sync.CANON / "agents"
-    live_names = {s.name for s in src_dir.glob("*.md")}
+    """--check: diff generated opencode + codex agent artifacts against their
+    sources without writing anything, plus opencode orphans. Returns True if
+    no drift. Hand-authored-but-not-yet-imported agents are not drift — import
+    is additive and only ever runs as part of main()."""
+    sources = all_source_agents()
     drift = []
-    for src in sorted(src_dir.glob("*.md")):
+    for name, src in sorted(sources.items()):
         dest, content = _build(src)
         if dest.exists() and MARKER not in dest.read_text():
-            continue  # hand-written, not ours to check
+            continue
         if not dest.exists() or dest.read_text() != content:
             drift.append(dest.name)
     if OC_DIR.exists():
         for f in OC_DIR.glob("*.md"):
-            if f.name not in live_names and MARKER in f.read_text():
+            if f.stem not in sources and MARKER in f.read_text():
                 drift.append(f"{f.name} (orphan)")
+    for home in sync.codex_homes():
+        toml_path = Path(home) / "config.toml"
+        existing = toml_path.read_text() if toml_path.exists() else ""
+        for name, src in sources.items():
+            if _codex_agent_block(name, src) not in existing:
+                drift.append(f"{toml_path.name}:agents.{name}")
     if drift:
         print(f"port-agents --check: drift in {drift} — run: make agents")
     return not drift

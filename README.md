@@ -74,13 +74,13 @@ No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
 | **Skills** | ✅ every harness | store + enabled-plugin skills → `~/.agents/skills` |
 | **Commands / prompts** | ✅ every harness | Claude + opencode + Codex command dirs unified |
 | **MCP servers** | ✅ opencode + Codex | pulled from Claude (user + plugins) into `~/.agent-home/mcp.json`, distributed to each harness's native format. stdio ports cleanly; remote ports too (Codex needs `experimental_use_rmcp_client`); Claude-managed-OAuth servers port the definition but you re-auth in the target harness |
-| **Agents** (subagents) | ✅ Claude + opencode | Claude-format is canonical; `port-agents.py` mechanically translates to opencode's agent format (description/tools/model via `models.json` aliases). Codex has no subagent model |
+| **Agents** (subagents) | ✅ Claude + opencode + Codex | Claude-format is canonical; `port-agents.py` mechanically translates to opencode's agent format (description/tools/model via `models.json` aliases) and to Codex `[agents.<key>]` tables in `config.toml` (confirmed by a live smoke test — Codex has no `~/.codex/agents/` file convention). Only name/description/developer_instructions port to Codex; `model`/`model_reasoning_effort`/`sandbox_mode` are lossy — Claude's per-tool allowlists have no confirmed Codex mapping yet, so they're omitted rather than guessed, pending a logged-in Codex session |
 | **Session state** (handoff) | ✅ every harness | `/handoff` writes `~/.agent-home/handoff.md`; every harness reads it at session start |
 | **Session history** | ✅ every harness | `history.py` indexes Claude/Codex/opencode transcripts into `~/.agent-home/history/`, searchable from any agent |
 | **Secrets / env** | ✅ every harness | `~/.agent-home/env` sourced by every shell via one `~/.zshenv` line |
 | **Workflows** | ✅ across Claude profiles | Claude-Code-specific (the Workflow tool) |
 | **Plugins** | ✅ decomposed | a plugin = skills + commands + **MCP servers** + hooks + subagents. The first three now port to every harness (see their rows). What doesn't: the plugin *runtime* (marketplaces, its hooks — Claude-specific event JSON, machine-local install cache). So you get a plugin's tools and skills in opencode/Codex, just not its Claude-only hook wiring. |
-| **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain); opencode hooks are TS functions, Codex hooks a different shape — semantic re-author, not sync |
+| **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain); opencode hooks are TS functions, Codex hooks a different shape — semantic re-author, not sync. Whether Codex expands `${CLAUDE_PLUGIN_ROOT}` in a hook command at runtime is still unconfirmed (#13, #19) — needs a logged-in interactive session to observe; a hook-carrying plugin also needs a one-time first-run trust grant before Codex will run its hooks at all (see "Manual steps" in #19's PR) |
 
 ### Non-breaking
 
@@ -199,7 +199,7 @@ every class below is a specific run, not a feature-table read.
 | MCP generation | **ours** (`port-mcp.py`) | rulesync's `--global` MCP write replaced the entire `~/.codex/config.toml` and `~/.config/opencode/opencode.jsonc`, deleting unrelated sections; `port-mcp.py` merges only its own keys |
 | Subagents — Claude Code | **ours** (nothing to generate) | the store's `agents/*.md` already is Claude's native subagent format |
 | Subagents — opencode | **ours** (`port-agents.py`) | rulesync writes to `~/.config/opencode/agents/` (plural); the real, running opencode reads `~/.config/opencode/agent/` (singular) and never loads the rulesync path |
-| Subagents — Codex TOML | **unconfirmed, not adopted** | rulesync writes `~/.codex/agents/*.toml`, but codex-cli 0.144.1 has no `agent` subcommand or documented convention for that path; needs a wave-2 smoke test before it can win against anything |
+| Subagents — Codex TOML | **ours** (`port-agents.py`) | confirmed by a live smoke test (issue #20): codex-cli 0.144.1 has no `~/.codex/agents/*.toml` convention at all — `agents.<key>` roles are a table inside `config.toml` itself, the model's own `spawn_agent` tool picks from them. rulesync's `~/.codex/agents/*.toml` target is confirmed dead |
 | Skills / commands placement | **ours** (`sync.py` symlinks) | rulesync copies a file per harness; our symlinks are one shared file every harness reads live, no regenerate step |
 | Rules (AGENTS.md fan-out) | **ours** (`sync.py` symlinks) | rulesync reproduced AGENTS.md byte-for-byte with no per-tool transform, which a symlink already does for free |
 | Hooks emission | **ours** (#13 shim path) | rulesync's `hooks` feature merges into a harness's own global settings file; #13 needs vendored-plugin manifests and marketplace indexes, which rulesync's `hooks` feature never touches |
