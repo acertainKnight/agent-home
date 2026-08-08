@@ -12,6 +12,7 @@ python3 scripts/wire-opencode.py "$CIO"
 python3 scripts/port-mcp.py adopt && python3 scripts/port-mcp.py apply
 python3 scripts/port-agents.py
 [ -d "$HOME/.cursor" ] && python3 scripts/port-hooks-cursor.py
+python3 scripts/port-settings.py capture
 python3 scripts/history.py index
 python3 scripts/history.py latest
 python3 scripts/distill-codex.py

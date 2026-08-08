@@ -30,6 +30,9 @@ status:  ## show every symlink's state
 verify:  ## prove an account runs on membership, not API credits (ACCOUNT=name)
 	@./scripts/verify-claude-membership.sh $(ACCOUNT)
 
+test-ownership:  ## prove the store owns its content (env-override, no live renames)
+	python3 test_ownership.py
+
 test:  ## run the merge-engine self-check
 	@python3 test_merge.py
 
