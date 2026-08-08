@@ -136,8 +136,26 @@ for chome in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))" 2>/
     ROWS=$(sqlite3 "$db" "select count(*) from stage1_outputs" 2>/dev/null || echo 0)
     [ "${ROWS:-0}" -eq 0 ] \
       && ok "codex native memory empty (all learnings flow through the store)" \
-      || bad "codex native memory has $ROWS session memories NOT in the shared store — export or disable codex memory"
+      || bad "codex native memory has $ROWS session memories NOT in the shared store — run: python3 scripts/distill-codex-memory.py"
   done
+done
+
+# hook-carrying plugins installed in Codex: plugin listed + enabled in
+# config.toml AND its manifest actually references a hooks file. This proves
+# the install step ran, NOT that the hook fires — firing needs hook TRUST,
+# granted only in an interactive session (see README's Hooks row, #19).
+for chome in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))" 2>/dev/null); do
+  RESULT=$(python3 scripts/codex-hooks-status.py "$chome" "$STORE" 2>/dev/null)
+  TOTAL="${RESULT%%|*}"; MISSING="${RESULT#*|}"
+  if [ -z "${TOTAL:-}" ]; then
+    info "$chome: could not read plugin state (no config.toml yet?)"
+  elif [ "$TOTAL" -eq 0 ]; then
+    info "$chome: no enabled plugin ships hooks"
+  elif [ -z "$MISSING" ]; then
+    ok "$chome: $TOTAL hook-carrying plugin(s) installed+enabled"
+  else
+    bad "$chome: hook-carrying plugin(s) not installed: $MISSING — run: make install"
+  fi
 done
 
 # accounts (token liveness; never prints tokens)

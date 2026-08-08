@@ -240,6 +240,27 @@ if [ "$(has_target codex)" = "True" ]; then
   for home in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))"); do
     [ -f "$home/config.toml" ] || { mkdir -p "$home"; cp templates/codex.config.toml "$home/config.toml"; echo "  wrote $home/config.toml"; }
   done
+  # Store marketplace + every enabled plugin — both `codex plugin marketplace
+  # add` and `codex plugin add` no-op cleanly on a repeat run, so this is safe
+  # to run every install. This does NOT grant hook trust (a separate,
+  # interactive first-run walk per hook-carrying plugin — see README's Hooks
+  # row and "Manual steps" in #19's PR); an installed-but-untrusted hook never
+  # fires, silently.
+  if command -v codex >/dev/null 2>&1 && [ -d "$STORE/plugins" ]; then
+    for home in $(python3 -c "import sync; print(' '.join(sync.codex_homes()))"); do
+      CODEX_HOME="$home" codex plugin marketplace add "$STORE/plugins" >/dev/null 2>&1
+      n=0
+      for name in $(python3 -c "
+import json
+try: enabled = json.load(open('$STORE/plugins/enabled.json'))
+except OSError: enabled = {}
+print(' '.join(sorted(k for k, v in enabled.items() if v)))
+"); do
+        CODEX_HOME="$home" codex plugin add "$name@agent-home" >/dev/null 2>&1 && n=$((n+1))
+      done
+      echo "  $home: agent-home marketplace added, $n plugin(s) installed"
+    done
+  fi
 fi
 
 if [ "$(has_target opencode)" = "True" ]; then
