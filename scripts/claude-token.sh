@@ -40,6 +40,19 @@ print(os.path.expanduser(m["config_dir"]), m.get("keychain") or "-", sep="\t")
 PY
 )
 
+# No keychain service configured -> derive it. Claude Code stores the default
+# profile under "Claude Code-credentials" and every other CLAUDE_CONFIG_DIR
+# under "Claude Code-credentials-<first 8 hex of sha256(abs config dir)>"
+# (verified 2026-08-08: sha256("/Users/nick/.claude-work")[:8] = 03b3f521,
+# matching the live keychain item refreshed by that profile's login).
+if [ "$KEYCHAIN" = "-" ]; then
+  if [ "$CONFIG_DIR" = "$HOME/.claude" ]; then
+    KEYCHAIN="Claude Code-credentials"
+  else
+    KEYCHAIN="Claude Code-credentials-$(python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])' "$CONFIG_DIR")"
+  fi
+fi
+
 emit_from_json() {  # stdin = credentials json; print token or nothing
   # NB: python3 -c (not `python3 - <<HEREDOC`) so sys.stdin stays the piped data.
   python3 -c '
