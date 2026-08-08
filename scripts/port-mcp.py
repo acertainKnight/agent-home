@@ -3,45 +3,88 @@
 
 A Claude Code plugin is really {skills, commands, subagents, MCP servers, hooks}.
 Skills/commands already travel via the store. This adds MCP servers: it reads
-every MCP definition Claude Code knows (user-level + enabled plugins' bundled
-.mcp.json) into ONE canonical file (~/.agent-home/mcp.json), then generates each
-harness's native MCP config from it (non-breaking merge).
+every MCP definition any harness knows (Claude user-level + enabled plugins'
+bundled .mcp.json, Codex's config.toml, opencode's mcp block) plus a hand-
+curated list of claude.ai-only remote connectors, unions them into ONE
+canonical file (~/.agent-home/mcp.json), then generates each harness's native
+MCP config from it (non-breaking merge).
 
-  port-mcp.py adopt      Claude MCP defs -> ~/.agent-home/mcp.json (merge)
+  port-mcp.py adopt      union every harness's MCP defs + hand connectors -> ~/.agent-home/mcp.json
   port-mcp.py apply      canonical -> opencode.jsonc + ~/.codex/config.toml (merge)
   port-mcp.py check      diff live configs against canonical; exit non-zero on drift
   port-mcp.py list       show canonical servers and per-harness portability
 
-Canonical schema (~/.agent-home/mcp.json):
-  {"servers": {"<name>": {
-      "transport": "stdio"|"remote",
+Canonical schema (~/.agent-home/mcp.json), Agent Plugins spec vocabulary:
+  {"mcpServers": {"<name>": {
+      "type": "stdio"|"streamable-http"|"sse",
+      "origin": "claude"|"codex"|"opencode"|"hand",   # where adopt() found it
       # stdio:
       "command": "bun", "args": ["run", "..."], "env": {"K": "V"},
-      # remote:
-      "url": "https://…", "protocol": "http"|"sse", "headers": {"…": "…"}
+      # streamable-http / sse:
+      "url": "https://…", "headers": {"…": "…"}
   }}}
+A file written before this vocabulary (top-level "servers", "transport"/
+"protocol") is read once via a backward-compat migration in load_canon();
+the next adopt() rewrites it clean, so the migration only ever fires once
+per machine.
 """
 import json
 import os
+import re
 import sys
+import tomllib
 from pathlib import Path
 
 HOME = Path.home()
 STORE = Path(os.environ.get("AGENT_HOME", HOME / ".agent-home"))
 CANON = STORE / "mcp.json"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import sync  # noqa: E402 (needs the sys.path insert above)
+
+# Remote connectors claude.ai connects with NO on-disk source of their own —
+# ~/.claude.json's claudeAiMcpEverConnected holds display names only, never
+# endpoints. Endpoints below are the ones the ticket supplied directly, plus
+# Expedia's confirmed via https://mcpservers.org/remote-mcp-servers/expedia
+# (Expedia's own developer docs describe MCP as still "in exploration", so
+# that page is the only public confirmation of the live endpoint). All OAuth
+# (no static headers) -> generate_codex emits auth = "oauth", opencode gets
+# its plain remote form. "slack" and "cortex" are already adopted from a live
+# harness and stay out of this list to avoid a second, conflicting source.
+# WhatsApp: no vendor-published remote MCP endpoint exists (Meta ships none;
+# only third-party bridges like verygoodplugins/whatsapp-mcp) — not guessed,
+# see the comment on issue #15 instead.
+HAND_CONNECTORS = {
+    "notion": "https://mcp.notion.com/mcp",
+    "linear": "https://mcp.linear.app/mcp",
+    "vercel": "https://mcp.vercel.com",
+    "supabase": "https://mcp.supabase.com/mcp",
+    "figma": "https://mcp.figma.com/mcp",
+    "huggingface": "https://huggingface.co/mcp",
+    "context7": "https://mcp.context7.com/mcp",
+    "miro": "https://mcp.miro.com",
+    "strava": "https://mcp.strava.com/mcp",
+    "google-calendar": "https://calendarmcp.googleapis.com/mcp/v1",
+    "gmail": "https://gmailmcp.googleapis.com/mcp/v1",
+    "google-drive": "https://drivemcp.googleapis.com/mcp/v1",
+    "expedia": "https://www.expedia.com/mcp",
+}
+
+
+def read_hand_connectors():
+    return {n: {"type": "streamable-http", "url": u} for n, u in HAND_CONNECTORS.items()}
+
 
 def _normalize(name, cfg):
-    """Claude MCP entry -> canonical entry."""
+    """Claude MCP entry -> canonical entry (AP spec vocabulary)."""
     remote_url = cfg.get("url")
     ctype = cfg.get("type", "")
     if remote_url or ctype in ("http", "sse", "streamable-http"):
-        e = {"transport": "remote", "url": remote_url,
-             "protocol": "sse" if ctype == "sse" else "http"}
+        e = {"type": "sse" if ctype == "sse" else "streamable-http", "url": remote_url}
         if cfg.get("headers"):
             e["headers"] = cfg["headers"]
         return e
-    e = {"transport": "stdio", "command": cfg.get("command", "")}
+    e = {"type": "stdio", "command": cfg.get("command", "")}
     if cfg.get("args"):
         e["args"] = cfg["args"]
     if cfg.get("env"):
@@ -64,7 +107,10 @@ def _expand(obj, subs):
 
 
 def read_claude_mcp():
-    """All MCP servers Claude Code knows: user-level + enabled plugins' .mcp.json."""
+    """All MCP servers Claude Code knows: user-level + enabled plugins' .mcp.json.
+    Plugin roots prefer the vendored store copy (~/.agent-home/plugins/<name>)
+    over Claude's version-pinned cache path, once vendor-plugins.py has run —
+    the cache path breaks on the next plugin update, the store copy doesn't."""
     servers = {}
     # user-level (~/.claude.json)
     uj = HOME / ".claude.json"
@@ -81,48 +127,146 @@ def read_claude_mcp():
     for name, entries in inst.items():
         if not enabled.get(name):
             continue
-        root = Path(entries[0]["installPath"])
+        short = name.split("@")[0]
+        vendored = STORE / "plugins" / short
+        root = vendored if vendored.is_dir() else Path(entries[0]["installPath"])
         mf = root / ".mcp.json"
         if mf.exists():
             subs = {"CLAUDE_PLUGIN_ROOT": str(root),
-                    "CLAUDE_PLUGIN_DATA": str(data_root / name.split("@")[0])}
+                    "CLAUDE_PLUGIN_DATA": str(data_root / short)}
             for n, c in json.load(open(mf)).get("mcpServers", {}).items():
                 servers.setdefault(n, _normalize(n, _expand(c, subs)))
     return servers
 
 
+def read_codex_mcp():
+    """[mcp_servers.*] tables from every codex_home's config.toml -> canonical
+    entries. Multiple accounts can define the same server name differently;
+    later homes win (matches adopt()'s general last-source-wins-on-heal rule)."""
+    servers = {}
+    for home in sync.codex_homes():
+        toml_path = Path(home) / "config.toml"
+        if not toml_path.exists():
+            continue
+        try:
+            data = tomllib.loads(toml_path.read_text())
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        for n, cfg in data.get("mcp_servers", {}).items():
+            if "url" in cfg:
+                e = {"type": "streamable-http", "url": cfg["url"]}
+                bev = cfg.get("bearer_token_env_var")
+                if bev:
+                    e["headers"] = {"Authorization": "Bearer ${%s}" % bev}
+            else:
+                e = {"type": "stdio", "command": cfg.get("command", "")}
+                if cfg.get("args"):
+                    e["args"] = cfg["args"]
+                if cfg.get("env"):
+                    e["env"] = cfg["env"]
+            servers[n] = e
+    return servers
+
+
+def read_opencode_mcp():
+    """opencode.jsonc's `mcp` block -> canonical entries."""
+    cfg = _read_jsonc(OPENCODE)
+    if not cfg:
+        return {}
+    servers = {}
+    for n, e in cfg.get("mcp", {}).items():
+        if e.get("type") == "remote":
+            out = {"type": "streamable-http", "url": e.get("url")}
+            if e.get("headers"):
+                out["headers"] = e["headers"]
+        else:
+            cmd = e.get("command") or []
+            out = {"type": "stdio", "command": cmd[0] if cmd else ""}
+            if len(cmd) > 1:
+                out["args"] = cmd[1:]
+            if e.get("environment"):
+                out["env"] = e["environment"]
+        servers[n] = out
+    return servers
+
+
+def _migrate_entry(e):
+    """A pre-spec-vocabulary canonical entry ("transport"/"protocol") -> the AP
+    spec vocabulary ("type"). One-shot: adopt() always writes the new form, so
+    this only ever fires against a file nothing has re-adopted yet."""
+    if "type" in e:
+        return e
+    if e.get("transport") == "stdio":
+        out = {"type": "stdio", "command": e.get("command", "")}
+        if e.get("args"):
+            out["args"] = e["args"]
+        if e.get("env"):
+            out["env"] = e["env"]
+    else:
+        out = {"type": "sse" if e.get("protocol") == "sse" else "streamable-http",
+               "url": e.get("url")}
+        if e.get("headers"):
+            out["headers"] = e["headers"]
+    if e.get("origin"):
+        out["origin"] = e["origin"]
+    return out
+
+
 def load_canon():
-    if CANON.exists():
-        return json.load(open(CANON)).get("servers", {})
-    return {}
+    if not CANON.exists():
+        return {}
+    raw = json.load(open(CANON))
+    if "mcpServers" in raw:
+        return raw["mcpServers"]
+    return {n: _migrate_entry(e) for n, e in raw.get("servers", {}).items()}
+
+
+def _has_cache_path(e):
+    """True if a stdio entry's command/args reference Claude's version-pinned
+    plugin cache (~/.claude/plugins/cache/...) — stale once the plugin is
+    vendored into the store, since the cache path breaks on the next update."""
+    if e.get("type") != "stdio":
+        return False
+    return any("/plugins/cache/" in str(a) for a in [e.get("command", "")] + list(e.get("args", [])))
 
 
 def adopt():
+    """Union every harness's MCP defs + the hand-curated connectors into the
+    canonical file. New names are added with their origin recorded; an
+    existing entry is only ever overwritten to heal a stale plugin-cache path
+    (never to silently replace a manually-adjusted entry)."""
     servers = load_canon()
-    found = read_claude_mcp()
-    added = 0
-    for n, e in found.items():
-        if n not in servers:
-            servers[n] = e
-            added += 1
+    added = healed = 0
+    for origin, found in (("claude", read_claude_mcp()),
+                           ("codex", read_codex_mcp()),
+                           ("opencode", read_opencode_mcp()),
+                           ("hand", read_hand_connectors())):
+        for n, e in found.items():
+            if n not in servers:
+                e["origin"] = origin
+                servers[n] = e
+                added += 1
+            elif _has_cache_path(servers[n]) and not _has_cache_path(e):
+                e["origin"] = servers[n].get("origin", origin)
+                servers[n] = e
+                healed += 1
     STORE.mkdir(parents=True, exist_ok=True)
-    json.dump({"servers": servers}, open(CANON, "w"), indent=2)
-    print(f"canonical mcp.json: {len(servers)} servers ({added} new)")
+    json.dump({"mcpServers": servers}, open(CANON, "w"), indent=2)
+    extra = f", {healed} healed" if healed else ""
+    print(f"canonical mcp.json: {len(servers)} servers ({added} new{extra})")
 
 
 def cmd_list():
     for n, e in load_canon().items():
-        if e["transport"] == "stdio":
+        if e["type"] == "stdio":
             print(f"  {n}: stdio ({e.get('command')}) — ports to opencode + codex")
         else:
             oauth = not e.get("headers")
-            print(f"  {n}: remote {e.get('protocol')} ({e.get('url','')[:40]}…) — "
+            print(f"  {n}: remote {e.get('type')} ({e.get('url','')[:40]}…) — "
                   f"opencode + codex: yes"
                   + ("; Claude-managed OAuth → re-authenticate in each harness" if oauth
                      else "; static auth ports"))
 
-
-import re
 
 OPENCODE = HOME / ".config/opencode/opencode.jsonc"
 CODEX_TOML = HOME / ".codex/config.toml"
@@ -165,7 +309,7 @@ def _oc_entry(e):
     """canonical server entry -> opencode's mcp.<name> shape (the key this
     emitter owns; shared by generate_opencode and check_opencode so the two
     can never drift apart from each other)."""
-    if e["transport"] == "stdio":
+    if e["type"] == "stdio":
         entry = {"type": "local",
                  "command": [e["command"]] + list(e.get("args", [])),
                  "enabled": True}
@@ -225,7 +369,7 @@ def _codex_block(n, e):
     Shared by generate_codex and check_codex so the two can't drift apart."""
     lines = [f"\n[mcp_servers.{n}]"]
     reauth = None
-    if e["transport"] == "stdio":
+    if e["type"] == "stdio":
         lines.append(f"command = {_toml_str(e['command'])}")
         if e.get("args"):
             lines.append("args = [" + ", ".join(_toml_str(a) for a in e["args"]) + "]")
@@ -240,7 +384,7 @@ def _codex_block(n, e):
         else:
             lines.append('auth = "oauth"')  # Claude-managed OAuth -> re-auth in Codex
             reauth = n
-    return "\n".join(lines), e["transport"] == "remote", reauth
+    return "\n".join(lines), e["type"] != "stdio", reauth
 
 
 def generate_codex():
