@@ -292,5 +292,38 @@ PY
 fi
 
 echo
+
+# -- settings custody (#16) --
+python3 "$PWD/scripts/port-settings.py" check >/dev/null 2>&1 \
+  && ok "settings capture matches live ~/.claude/settings.json" \
+  || info "settings capture stale or absent — next resync heals it (scripts/port-settings.py capture)"
+
+# -- store-ownership acceptance harness (#18): counts derived from the store, no cache links --
+OWN=$(python3 - <<PY
+import sys, json
+sys.path.insert(0, "$PWD")
+from pathlib import Path
+import importlib.util
+spec = importlib.util.spec_from_file_location("sync", "$PWD/sync.py")
+sync = importlib.util.module_from_spec(spec); spec.loader.exec_module(sync)
+home = Path.home()
+expect_skills = len(list((sync.CANON/"skills").glob("*"))) + len(sync.enabled_plugin_skill_dirs())
+expect_cmds = len(list((sync.CANON/"commands").glob("*.md"))) + len(sync.enabled_plugin_command_files())
+links = [p for p in (home/".agents/skills").iterdir() if p.is_symlink()]
+cmds  = [p for p in (home/".agents/commands").iterdir() if p.is_symlink()]
+cache = [p for p in links+cmds if "plugins/cache" in str(p.resolve())]
+outside = [p for p in links+cmds if str(sync.CANON) not in str(p.resolve())]
+print(f"{len(links)}/{expect_skills};{len(cmds)}/{expect_cmds};{len(cache)};{len(outside)}")
+PY
+)
+SK=${OWN%%;*}; REST=${OWN#*;}; CM=${REST%%;*}; REST=${REST#*;}; CA=${REST%%;*}; OUT=${REST##*;}
+[ "${SK%/*}" = "${SK#*/}" ] && [ "${CM%/*}" = "${CM#*/}" ] \
+  && ok "ownership counts: skills $SK, commands $CM (store-derived)" \
+  || bad "ownership count mismatch: skills $SK commands $CM — run: python3 sync.py"
+[ "$CA" = "0" ] && ok "no symlink resolves into a plugins/cache dir" \
+  || bad "$CA symlink(s) resolve into plugins/cache — store does not own them; run: python3 sync.py"
+[ "$OUT" = "0" ] && ok "every ~/.agents link resolves inside ~/.agent-home" \
+  || bad "$OUT link(s) resolve outside the store"
+
 [ "$FAILS" -eq 0 ] && echo "All healthy." || echo "$FAILS problem(s) — fixes listed above."
 exit $((FAILS > 0))
