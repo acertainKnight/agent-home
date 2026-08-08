@@ -49,6 +49,24 @@ HARNESSES = {
     "opencode": [
         (CANON / "AGENTS.md", HOME / ".config/opencode/AGENTS.md"),
         (HOME / ".agents/commands", HOME / ".config/opencode/command"),  # note: singular
+        # opencode auto-loads every file under plugins/ -- no config entry
+        # needed. Six Claude-hook-parity behaviors (#22): ponytail/explanatory/
+        # superpowers/MEMORY.md injection, remember capture, cortex context.brief,
+        # dedupe-reads, security-guidance pattern warnings.
+        (CANON / "hooks/opencode/agent-home-hooks.ts", HOME / ".config/opencode/plugins/agent-home-hooks.ts"),
+    ],
+    # Cursor (cursor-agent CLI + Cursor.app): AGENTS.md at ~/.cursor/AGENTS.md
+    # (global fallback -- cursor-agent's CONFIRMED read is project-root
+    # AGENTS.md/CLAUDE.md; the global path is unconfirmed pending a live
+    # `cursor-agent login`, see README) and ~/.agents/skills linked into
+    # ~/.cursor/skills (a path Cursor's own docs say it also auto-detects
+    # ~/.agents/skills directly -- this link is explicit/redundant coverage).
+    # MCP (~/.cursor/mcp.json) and hooks (~/.cursor/hooks.json) are handled by
+    # port-mcp.py / port-hooks-cursor.py, not plain symlinks -- both need
+    # translation, not a byte-identical mount.
+    "cursor": [
+        (CANON / "AGENTS.md", HOME / ".cursor/AGENTS.md"),
+        (HOME / ".agents/skills", HOME / ".cursor/skills"),
     ],
     # Codex CLI is handled dynamically (one CODEX_HOME per chatgpt-sub account);
     # see codex_links() below.
@@ -112,7 +130,10 @@ AGENTS_COMMANDS = HOME / ".agents/commands"  # generated command/prompt library
 
 # Native skill dirs to MERGE into the store on sweep/adopt (skills reach these
 # harnesses via ~/.agents/skills, so we import but don't keep a back-link).
-SKILL_SWEEP = [AGENTS_SKILLS, HOME / ".codex/skills"]
+# skills-cursor (#23): a stale, disjoint skill set from a pre-agent-home sync
+# tool; swept once like any other native dir so nothing unique is lost before
+# the directory is retired (see its README breadcrumb).
+SKILL_SWEEP = [AGENTS_SKILLS, HOME / ".codex/skills", HOME / ".cursor/skills-cursor"]
 
 
 PLUGINS_DIR = CANON / "plugins"  # vendored plugin bytes (scripts/vendor-plugins.py)

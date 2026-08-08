@@ -10,7 +10,7 @@ canonical file (~/.agent-home/mcp.json), then generates each harness's native
 MCP config from it (non-breaking merge).
 
   port-mcp.py adopt      union every harness's MCP defs + hand connectors -> ~/.agent-home/mcp.json
-  port-mcp.py apply      canonical -> opencode.jsonc + ~/.codex/config.toml (merge)
+  port-mcp.py apply      canonical -> opencode.jsonc + ~/.codex/config.toml + ~/.cursor/mcp.json (merge)
   port-mcp.py check      diff live configs against canonical; exit non-zero on drift
   port-mcp.py list       show canonical servers and per-harness portability
 
@@ -259,11 +259,11 @@ def adopt():
 def cmd_list():
     for n, e in load_canon().items():
         if e["type"] == "stdio":
-            print(f"  {n}: stdio ({e.get('command')}) — ports to opencode + codex")
+            print(f"  {n}: stdio ({e.get('command')}) — ports to opencode + codex + cursor")
         else:
             oauth = not e.get("headers")
             print(f"  {n}: remote {e.get('type')} ({e.get('url','')[:40]}…) — "
-                  f"opencode + codex: yes"
+                  f"opencode + codex + cursor: yes"
                   + ("; Claude-managed OAuth → re-authenticate in each harness" if oauth
                      else "; static auth ports"))
 
@@ -271,6 +271,7 @@ def cmd_list():
 OPENCODE = HOME / ".config/opencode/opencode.jsonc"
 CODEX_TOML = HOME / ".codex/config.toml"
 CODEX_REMOTE = True  # Codex supports Streamable-HTTP MCP (needs experimental_use_rmcp_client)
+CURSOR_MCP = HOME / ".cursor/mcp.json"
 
 _VARREF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
 
@@ -359,6 +360,63 @@ def check_opencode():
     return not drift
 
 
+def _cursor_entry(e):
+    """canonical server entry -> Cursor's mcpServers.<name> shape (the key this
+    emitter owns; shared by generate_cursor and check_cursor). Cursor's
+    ~/.cursor/mcp.json uses the same {"mcpServers": {...}} vocabulary Claude's
+    own ~/.claude.json does -- {command,args,env} for stdio, {url,headers} for
+    remote, no "type" key (confirmed against Cursor's docs; unlike opencode's
+    {"type":"local"|"remote",...} shape)."""
+    if e["type"] == "stdio":
+        entry = {"command": e["command"]}
+        if e.get("args"):
+            entry["args"] = list(e["args"])
+        if e.get("env"):
+            entry["env"] = dict(e["env"])
+    else:
+        entry = {"url": e.get("url")}
+        if e.get("headers"):
+            entry["headers"] = dict(e["headers"])
+    return entry
+
+
+def generate_cursor():
+    """Merge canonical MCP servers into ~/.cursor/mcp.json's mcpServers key,
+    non-breaking (any server not in canonical, and any other top-level key,
+    is left untouched)."""
+    servers = load_canon()
+    if not servers:
+        return
+    try:
+        cfg = json.load(open(CURSOR_MCP)) if CURSOR_MCP.exists() else {}
+    except json.JSONDecodeError:
+        sys.exit(f"port-mcp: {CURSOR_MCP} exists but won't parse as JSON — not touching it.")
+    mcp = cfg.setdefault("mcpServers", {})
+    for n, e in servers.items():
+        mcp[n] = _cursor_entry(e)
+    CURSOR_MCP.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(cfg, open(CURSOR_MCP, "w"), indent=2)
+    print(f"cursor: wrote {len(servers)} MCP server(s) into {CURSOR_MCP}")
+
+
+def check_cursor():
+    """--check: diff the mcpServers.<name> entries this emitter owns against
+    the live file, without writing anything. Returns True if no drift."""
+    servers = load_canon()
+    if not servers:
+        return True
+    try:
+        cfg = json.load(open(CURSOR_MCP)) if CURSOR_MCP.exists() else {}
+    except json.JSONDecodeError:
+        print(f"cursor --check: {CURSOR_MCP} unparseable as JSON")
+        return False
+    live = cfg.get("mcpServers", {})
+    drift = [n for n, e in servers.items() if live.get(n) != _cursor_entry(e)]
+    if drift:
+        print(f"cursor --check: drift in mcpServers.{{{', '.join(drift)}}} — run: make mcp")
+    return not drift
+
+
 def _toml_str(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -442,8 +500,9 @@ if __name__ == "__main__":
     elif cmd == "apply":
         generate_opencode()
         generate_codex()
+        generate_cursor()
     elif cmd == "check":
-        oc_ok, cx_ok = check_opencode(), check_codex()  # run both — don't let
-        sys.exit(0 if oc_ok and cx_ok else 1)            # one drift hide the other
+        oc_ok, cx_ok, cu_ok = check_opencode(), check_codex(), check_cursor()  # run all —
+        sys.exit(0 if oc_ok and cx_ok and cu_ok else 1)                        # don't let one drift hide another
     else:
         print(__doc__)

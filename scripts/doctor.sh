@@ -202,6 +202,18 @@ if [ -f "$STORE/mcp.json" ]; then
     || bad "MCP drift — $MCPCHECK"
 fi
 
+# Cursor's generated files (#23): hooks.json is a pure derivation from
+# vendored plugins (same "always safe to regenerate" contract as the
+# .claude-plugin/.codex-plugin shims), so drift means a plugin got
+# vendored/enabled/disabled since the last apply.
+if [ -d "$HOME/.cursor" ]; then
+  HOOKSCHECK=$(python3 scripts/port-hooks-cursor.py --check 2>&1); HOOKSRC=$?
+  [ "$HOOKSRC" -eq 0 ] && ok "cursor hooks.json matches vendored plugins" \
+    || bad "cursor hooks.json drift — run: python3 scripts/port-hooks-cursor.py"
+  [ -L "$HOME/.cursor/skills" ] && ok "cursor: ~/.cursor/skills linked" \
+    || info "cursor: ~/.cursor/skills not linked — run: make sync (only if cursor is a configured target)"
+fi
+
 # LiteLLM (on-demand service, so absence is informational)
 if [ "$(python3 -c "import json,os;print(json.load(open(os.environ['AGENT_HOME_CONFIG'])).get('litellm',False))" 2>/dev/null)" = "True" ]; then
   if nc -z localhost 4000 2>/dev/null; then ok "LiteLLM responding on :4000"

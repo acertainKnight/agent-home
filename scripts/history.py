@@ -8,7 +8,8 @@ decide about X last week?" no matter which harness the conversation happened in.
   ./history.py latest           newest transcript, any harness -> ~/.agent-home/handoff-auto.md
 
 Sources: Claude Code project transcripts (every account's CLAUDE_CONFIG_DIR),
-Codex CLI session rollouts (every CODEX_HOME), opencode's sqlite store.
+Codex CLI session rollouts (every CODEX_HOME), opencode's sqlite store,
+cursor-agent transcripts (~/.cursor/projects/*/agent-transcripts/).
 Best-effort by design: a source that's missing or unreadable is skipped.
 """
 import json
@@ -88,6 +89,22 @@ def _codex_extract(rec):
     return [(role, t) for t in _texts(payload.get("content"))]
 
 
+def _cursor_extract(rec):
+    # {"role": "user"|"assistant", "message": {"content": [{"type":"text",...}, ...]}}
+    role = rec.get("role")
+    if role not in ("user", "assistant"):
+        return []
+    msg = rec.get("message") or {}
+    return [(role, t) for t in _texts(msg.get("content"))]
+
+
+def _cursor_transcripts():
+    """~/.cursor/projects/<project>/agent-transcripts/<chatId>/<chatId>.jsonl —
+    one file per chat, single profile (no per-account CONFIG_DIR concept for
+    cursor-agent, unlike Claude/Codex)."""
+    return sorted((Path.home() / ".cursor/projects").glob("*/agent-transcripts/*/*.jsonl"))
+
+
 def index():
     HIST.mkdir(parents=True, exist_ok=True)
     stamps, done, skipped = _stamps(), 0, 0
@@ -122,6 +139,15 @@ def index():
             dest = HIST / "codex" / f"{src.stem}.md"
             done += _write_session(dest, f"codex session {src.stem}",
                                    _jsonl_turns(src, _codex_extract))
+
+    # cursor-agent: one jsonl transcript per chat
+    for src in _cursor_transcripts():
+        if src.stat().st_size > MAX_SRC_BYTES or not fresh(src):
+            skipped += 1
+            continue
+        dest = HIST / "cursor" / f"{src.stem}.md"
+        done += _write_session(dest, f"cursor session {src.stem}",
+                               _jsonl_turns(src, _cursor_extract))
 
     # opencode: sqlite (message.data has role; part.data has the text blocks)
     db = Path.home() / ".local/share/opencode/opencode.db"
@@ -220,6 +246,13 @@ def latest():
                 continue
             candidates.append((st.st_mtime, f"codex session {src.stem}",
                                 lambda src=src: _jsonl_turns(src, _codex_extract)))
+
+    for src in _cursor_transcripts():
+        st = src.stat()
+        if st.st_size > MAX_SRC_BYTES:
+            continue
+        candidates.append((st.st_mtime, f"cursor session {src.stem}",
+                            lambda src=src: _jsonl_turns(src, _cursor_extract)))
 
     oc = _opencode_latest_session()
     if oc:
