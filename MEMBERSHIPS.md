@@ -44,6 +44,10 @@ ChatGPT sub ─┬─ Codex CLI (official `codex login`)            ← zero ris
                 │                                    documented enforcement
                 └─→ exposes OpenAI-compatible endpoint → opencode / anything
 OpenRouter ──── opencode (already authed), Codex CLI (custom model_provider)
+Cursor sub ──── cursor-agent ONLY (its own account/plan; no subscription
+                logins from other vendors; BYOK = direct API keys, chat-only,
+                OpenRouter/base-URL not officially supported per cursor.com
+                docs — checked 2026-08-08)
 Local (Ollama/LM Studio) ── opencode + Codex CLI built-in provider IDs
 ```
 
