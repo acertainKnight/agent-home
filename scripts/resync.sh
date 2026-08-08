@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Full drift-elimination pass: links, MCP, opencode agents, history index,
-# codex distill. Run by the launchd watcher (on change + hourly) and `make resync`.
+# Full drift-elimination pass: links, MCP, opencode agents, cursor hooks,
+# history index, codex distill. Run by the launchd watcher (on change +
+# hourly) and `make resync`.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 STORE="${AGENT_HOME:-$HOME/.agent-home}"
@@ -10,6 +11,7 @@ CIO=$(python3 -c "import json;print(str(json.load(open('$STORE/config.json')).ge
 python3 scripts/wire-opencode.py "$CIO"
 python3 scripts/port-mcp.py adopt && python3 scripts/port-mcp.py apply
 python3 scripts/port-agents.py
+[ -d "$HOME/.cursor" ] && python3 scripts/port-hooks-cursor.py
 python3 scripts/history.py index
 python3 scripts/history.py latest
 python3 scripts/distill-codex.py

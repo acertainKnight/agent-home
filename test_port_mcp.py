@@ -180,6 +180,68 @@ def test_guard_still_holds_on_unparseable_opencode():
     shutil.rmtree(scratch)
 
 
+def test_cursor_entry_stdio():
+    # no "type" key -- Cursor's mcpServers shape matches Claude's own
+    # ~/.claude.json, unlike opencode's {"type":"local"|"remote",...}
+    e = {"type": "stdio", "command": "bun", "args": ["run", "x"], "env": {"K": "V"}}
+    assert pm._cursor_entry(e) == {"command": "bun", "args": ["run", "x"], "env": {"K": "V"}}
+
+
+def test_cursor_entry_stdio_minimal():
+    assert pm._cursor_entry({"type": "stdio", "command": "bash"}) == {"command": "bash"}
+
+
+def test_cursor_entry_remote():
+    e = {"type": "streamable-http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer ${TOK}"}}
+    assert pm._cursor_entry(e) == {"url": "https://x/mcp", "headers": {"Authorization": "Bearer ${TOK}"}}
+
+
+def test_cursor_entry_remote_no_headers():
+    assert pm._cursor_entry({"type": "streamable-http", "url": "https://x/mcp"}) == {"url": "https://x/mcp"}
+
+
+def test_generate_cursor_non_breaking_merge():
+    tmp = Path(tempfile.mkdtemp())
+    canon = tmp / "mcp.json"
+    canon.write_text(json.dumps({"servers": {"widget": {"type": "stdio", "command": "bun"}}}))
+    cursor_mcp = tmp / "mcp.json.cursor"
+    # pre-existing file with an unrelated key and an unrelated server --
+    # both must survive the merge untouched.
+    cursor_mcp.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}, "someOtherKey": True}))
+
+    pm.CANON = canon
+    pm.CURSOR_MCP = cursor_mcp
+    pm.generate_cursor()
+
+    out = json.loads(cursor_mcp.read_text())
+    assert out["mcpServers"]["widget"] == {"command": "bun"}
+    assert out["mcpServers"]["other"] == {"command": "x"}, "pre-existing unrelated server must survive"
+    assert out["someOtherKey"] is True, "pre-existing unrelated top-level key must survive"
+    shutil.rmtree(tmp)
+
+
+def test_check_cursor_detects_drift():
+    tmp = Path(tempfile.mkdtemp())
+    canon = tmp / "mcp.json"
+    canon.write_text(json.dumps({"servers": {"widget": {"type": "stdio", "command": "bun"}}}))
+    cursor_mcp = tmp / "mcp.json.cursor"
+
+    pm.CANON = canon
+    pm.CURSOR_MCP = cursor_mcp
+
+    # missing file entirely -> drift (servers exist in canon, nothing on disk)
+    assert pm.check_cursor() is False
+
+    pm.generate_cursor()
+    assert pm.check_cursor() is True, "freshly generated file must check clean"
+
+    # hand-edit one server -> drift again
+    live = json.loads(cursor_mcp.read_text())
+    live["mcpServers"]["widget"]["command"] = "python3"
+    cursor_mcp.write_text(json.dumps(live))
+    assert pm.check_cursor() is False
+    shutil.rmtree(tmp)
+
 if __name__ == "__main__":
     test_migrate_entry_old_vocabulary()
     test_load_canon_one_shot_migration()
@@ -187,5 +249,11 @@ if __name__ == "__main__":
     test_hand_connectors_emit_oauth_and_remote_form()
     test_adopt_round_trip_and_hand_authored_codex_entry()
     test_heal_stale_cache_path_on_reimport()
+    test_cursor_entry_stdio()
+    test_cursor_entry_stdio_minimal()
+    test_cursor_entry_remote()
+    test_cursor_entry_remote_no_headers()
+    test_generate_cursor_non_breaking_merge()
+    test_check_cursor_detects_drift()
     test_guard_still_holds_on_unparseable_opencode()
     print("port-mcp self-check: PASS")

@@ -15,18 +15,20 @@ STORE="${AGENT_HOME:-$HOME/.agent-home}"
 CONFIG="$STORE/config.json"          # per-user config lives IN the store, not the repo
 export AGENT_HOME_CONFIG="$CONFIG"   # read by the inline python blocks below
 
-KNOWN=(claude-code claude-code-work opencode codex)
+KNOWN=(claude-code claude-code-work opencode codex cursor)
 declare -A LABEL=(
   [claude-code]="Claude Code (~/.claude)"
   [claude-code-work]="Claude Code work profile (~/.claude-work)"
   [opencode]="opencode (~/.config/opencode)"
   [codex]="Codex CLI (~/.codex)"
+  [cursor]="Cursor (cursor-agent CLI + Cursor.app, ~/.cursor)"
 )
 detected() { case "$1" in
   claude-code)      [ -d "$HOME/.claude" ];;
   claude-code-work) [ -d "$HOME/.claude-work" ];;
   opencode)         command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ];;
   codex)            command -v codex >/dev/null 2>&1 || [ -d "$HOME/.codex" ];;
+  cursor)           command -v cursor-agent >/dev/null 2>&1 || [ -d "$HOME/.cursor" ];;
 esac; }
 
 ask() { # ask "question" default(y/n); reads the terminal even inside pipes
@@ -114,6 +116,7 @@ harnesses = {
   "claude-code-work": (H/".claude-work").is_dir(),
   "opencode": bool(__import__("shutil").which("opencode")) or (H/".config/opencode").is_dir(),
   "codex": bool(__import__("shutil").which("codex")) or (H/".codex").is_dir(),
+  "cursor": bool(__import__("shutil").which("cursor-agent")) or (H/".cursor").is_dir(),
 }
 accounts = json.loads(subprocess.check_output([sys.executable, "scripts/detect-accounts.py"]))["accounts"]
 json.dump({
@@ -186,7 +189,7 @@ else
   printf '%s\n' "${ACCT_SPECS[@]}" | python3 - "$LITELLM" "$CIO" "${SOURCES[*]}" "${TARGETS[*]}" <<'PY'
 import json, sys, os
 litellm, cio, sources, targets = sys.argv[1]=="true", sys.argv[2]=="true", sys.argv[3].split(), sys.argv[4].split()
-known = ["claude-code","claude-code-work","opencode","codex"]
+known = ["claude-code","claude-code-work","opencode","codex","cursor"]
 accounts = []
 for line in sys.stdin.read().splitlines():
     if not line.strip():
@@ -269,13 +272,20 @@ if [ "$(has_target opencode)" = "True" ]; then
   python3 scripts/wire-opencode.py "$(cfg claude_in_opencode False | tr '[:upper:]' '[:lower:]')"
 fi
 
-# 5. MCP servers — the portable core of "plugins". Pull every MCP Claude Code
+if [ "$(has_target cursor)" = "True" ]; then
+  echo "== 5. Cursor =="
+  command -v cursor-agent >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 && brew install --cask cursor-cli || echo "  ! install cursor-agent: https://cursor.com/cli"; }
+  command -v cursor-agent >/dev/null 2>&1 && ! cursor-agent status >/dev/null 2>&1 && echo "  · not logged in — run: cursor-agent login"
+fi
+
+# 6. MCP servers — the portable core of "plugins". Pull every MCP Claude Code
 # knows (user + enabled plugins) into the store, then distribute to each harness.
-echo "== 5. MCP servers (plugins → portable) =="
+echo "== 6. MCP servers (plugins → portable) =="
 python3 scripts/port-mcp.py adopt
 python3 scripts/port-mcp.py apply
+[ "$(has_target cursor)" = "True" ] && python3 scripts/port-hooks-cursor.py
 
-echo "== 6. Seamless-switching extras =="
+echo "== 7. Seamless-switching extras =="
 # Starter store content — only created if absent (store content is the user's).
 [ -f "$STORE/commands/handoff.md" ] || { cp templates/commands/handoff.md "$STORE/commands/handoff.md"; echo "  + /handoff command (session handoff, works in every harness)"; }
 [ -f "$STORE/models.json" ] || { cp templates/models.example.json "$STORE/models.json"; echo "  + models.json (edit to map model aliases per harness)"; }

@@ -71,16 +71,17 @@ No `just`/`make`? `./install.sh` is the same walkthrough; `--login`, `--status`,
 |---|---|---|
 | **Instructions** (CLAUDE.md/AGENTS.md) | ✅ every harness | merged, one source |
 | **Memory** (auto-memory) | ✅ | native in Claude Code; AGENTS.md bridge elsewhere |
-| **Skills** | ✅ every harness | store + enabled-plugin skills → `~/.agents/skills` |
+| **Skills** | ✅ every harness incl. Cursor | store + enabled-plugin skills → `~/.agents/skills`, also linked to `~/.cursor/skills` (#23) |
 | **Commands / prompts** | ✅ every harness | Claude + opencode + Codex command dirs unified |
-| **MCP servers** | ✅ opencode + Codex | pulled from Claude (user + plugins) into `~/.agent-home/mcp.json`, distributed to each harness's native format. stdio ports cleanly; remote ports too (Codex needs `experimental_use_rmcp_client`); Claude-managed-OAuth servers port the definition but you re-auth in the target harness |
+| **MCP servers** | ✅ opencode + Codex + Cursor | union-adopted from every harness plus hand-curated connectors into `~/.agent-home/mcp.json` (Agent Plugins spec vocabulary), distributed to each harness's native format. stdio ports cleanly; remote ports too (Codex needs `experimental_use_rmcp_client`); Claude-managed-OAuth servers port the definition but you re-auth in the target harness. Cursor's `~/.cursor/mcp.json` uses the same `mcpServers` shape Claude's own `~/.claude.json` does (#23) |
 | **Agents** (subagents) | ✅ Claude + opencode + Codex | Claude-format is canonical; `port-agents.py` mechanically translates to opencode's agent format (description/tools/model via `models.json` aliases) and to Codex `[agents.<key>]` tables in `config.toml` (confirmed by a live smoke test — Codex has no `~/.codex/agents/` file convention). Only name/description/developer_instructions port to Codex; `model`/`model_reasoning_effort`/`sandbox_mode` are lossy — Claude's per-tool allowlists have no confirmed Codex mapping yet, so they're omitted rather than guessed, pending a logged-in Codex session |
 | **Session state** (handoff) | ✅ every harness | `/handoff` writes `~/.agent-home/handoff.md`; every harness reads it at session start |
-| **Session history** | ✅ every harness | `history.py` indexes Claude/Codex/opencode transcripts into `~/.agent-home/history/`, searchable from any agent |
+| **Session history** | ✅ every harness incl. Cursor | `history.py` indexes Claude/Codex/opencode/cursor-agent transcripts into `~/.agent-home/history/`, searchable from any agent (#23) |
 | **Secrets / env** | ✅ every harness | `~/.agent-home/env` sourced by every shell via one `~/.zshenv` line |
 | **Workflows** | ✅ across Claude profiles | Claude-Code-specific (the Workflow tool) |
 | **Plugins** | ✅ decomposed | a plugin = skills + commands + **MCP servers** + hooks + subagents. The first three now port to every harness (see their rows). What doesn't: the plugin *runtime* (marketplaces, its hooks — Claude-specific event JSON, machine-local install cache). So you get a plugin's tools and skills in opencode/Codex, just not its Claude-only hook wiring. |
-| **Hooks / settings.json** | ❌ by design | machine/account-specific (absolute paths, model, permissions, keychain); opencode hooks are TS functions, Codex hooks a different shape — semantic re-author, not sync. Whether Codex expands `${CLAUDE_PLUGIN_ROOT}` in a hook command at runtime is still unconfirmed (#13, #19) — needs a logged-in interactive session to observe; a hook-carrying plugin also needs a one-time first-run trust grant before Codex will run its hooks at all (see "Manual steps" in #19's PR) |
+| **Hooks** | ✅ Codex via plugin manifests (trust-gated) · ⚠️ opencode: TS re-author (#22) · ✅ Cursor: translated emitter (#23) | Codex reads Claude's `hooks.json` schema through each vendored plugin's `.codex-plugin` manifest — a one-time interactive trust grant is required before hooks fire, and `${CLAUDE_PLUGIN_ROOT}` runtime expansion is still unconfirmed (see "Manual steps" in #19's PR). opencode hooks are TS functions, so a straight copy is never right: `hooks/opencode/agent-home-hooks.ts` re-implements six Claude hook behaviors on opencode's own hook points — see "opencode hook parity" below. Cursor gets `scripts/port-hooks-cursor.py`, which flattens vendored plugins' Claude-format `hooks.json` into `~/.cursor/hooks.json` for the events Cursor supports — see "Cursor harness" below. |
+| **settings.json** | ❌ by design (see #16) | machine/account-specific: absolute paths, model, permissions, keychain |
 
 ### Non-breaking
 
@@ -110,10 +111,13 @@ divergent instruction files (`CLAUDE.md` vs `AGENTS.md`) are concatenated under 
 | Claude Code (work) | `~/.claude-work/CLAUDE.md` → `~/.agent-home/AGENTS.md` | shares `~/.claude/skills` | via AGENTS.md instruction |
 | opencode | `~/.config/opencode/AGENTS.md` → `~/.agent-home/AGENTS.md` (also reads `~/.claude/CLAUDE.md` natively) | `~/.claude/skills` + `~/.agents/skills` (native) | via AGENTS.md instruction |
 | Codex CLI | `~/.codex/AGENTS.md` → `~/.agent-home/AGENTS.md` | `~/.agents/skills` (native) | via AGENTS.md instruction |
+| Cursor (cursor-agent CLI) | `~/.cursor/AGENTS.md` → `~/.agent-home/AGENTS.md` (unconfirmed global path — cursor-agent's CONFIRMED read is project-root AGENTS.md; see "Cursor harness" below) | `~/.cursor/skills` → `~/.agents/skills` (Cursor also auto-detects `~/.agents/skills` directly, per its own docs) | via AGENTS.md instruction |
 | anything else | point it at `~/.agent-home/AGENTS.md` | `~/.agents/skills` is the emerging default | via AGENTS.md instruction |
 
 `~/.agents/skills` is *generated* by `sync.py`: per-skill symlinks for every store
-skill plus every **enabled Claude Code plugin's** skills (95 at last run). Claude Code
+skill plus every **enabled Claude Code plugin's** skills (115 at last run — 21 of
+those came from `~/.cursor/skills-cursor`, a stale pre-agent-home sync tool's
+output, swept into the store by issue #23; see "Cursor harness" below). Claude Code
 plugins themselves (hooks, MCP, marketplaces) are architecturally Claude-specific and
 cannot port; their skills are the portable part, and this is how they travel.
 
@@ -343,3 +347,148 @@ agents, MCP servers, and hooks — a re-authoring project, not the thin mapping 
 ticket's own bar requires ("If a class needs more than a thin mapping, that class is
 a NO"). Issue #13's shim generator remains fully necessary regardless of whether
 this target is ever used.
+
+## opencode hook parity (#22)
+
+Claude Code hooks are event-JSON in `settings.json`; opencode hooks are TypeScript
+functions (`@opencode-ai/plugin`) — a straight copy was never possible. `hooks/opencode/
+agent-home-hooks.ts` re-implements six Claude-side behaviors on opencode's own hook
+points, symlinked (by `sync.py`) into `~/.config/opencode/plugins/agent-home-hooks.ts`.
+Every behavior reads its on/off state from `~/.agent-home/plugins/enabled.json` — the
+same store-owned list `sync.py` uses to decide which plugins' skills/commands port —
+so disabling a plugin in Claude Code silences its opencode counterpart too.
+
+| # | Claude behavior | opencode hook point | How |
+|---|---|---|---|
+| 1 | SessionStart context injections (ponytail, explanatory-output-style, superpowers) | `experimental.chat.system.transform` | fires every request, not just once — reuses ponytail's own `ponytail-instructions.js`/`ponytail-config.js` (vendored under `plugins/ponytail/hooks/`); explanatory-output-style is a fixed string; superpowers reads its `using-superpowers/SKILL.md` |
+| 2 | MEMORY.md auto-load | same hook | reads `~/.agent-home/memory/MEMORY.md` fresh every call — true auto-load, not the AGENTS.md "please read" instruction |
+| 3 | remember capture (UserPromptSubmit + PostToolUse) | `chat.message` + `tool.execute.after` | **reduced, not ported** — remember's real pipeline (`scripts/post-tool-hook.sh`) counts new lines in Claude Code's own on-disk session JSONL transcript, which opencode never writes; bridging to it would silently no-op. Instead: every prompt and non-read tool call is appended to `~/.agent-home/memory/staging/opencode.ndjson` (gitignored runtime output) — a durable trace, not auto-consolidation into MEMORY.md |
+| 4 | cortex SessionStart (context.brief) | `event` on `session.created` | fetches `/v1/context/brief` once per session (2s timeout, same contract as `hooks/session_start.sh`), delivered on the session's first system-prompt transform |
+| 4b | cortex SessionEnd (distill) | already solved | **not reimplemented here** — `plugins/cortex/hooks/opencode/session-distill.ts` already does this via debounced `session.idle`; left untouched |
+| 5 | dedupe_reads.py (PreToolUse on Read) | `tool.execute.before` | bridges to the real `~/.claude/hooks/dedupe_reads.py` (Nick's personal hook, not store-vendored) so both harnesses share one dedup decision; throws to block, matching opencode's documented "mutate args or throw" contract; fails open if the script is missing or errors |
+| 6 | security-guidance PostToolUse (pattern warnings) | `tool.execute.after` | bridges to the real, fully store-vendored `security_reminder_hook.py` for the fast synchronous Edit/Write pattern check. **Not ported**: the git-commit/push LLM review — that path is Claude-only `asyncRewake` (a delayed background review that re-wakes the conversation later, can take minutes), which has no opencode analog for a finished `tool.execute.after` call |
+
+Known, accepted loss: ponytail's statusline badge. opencode's status bar isn't
+plugin-extensible — no workaround exists.
+
+A real bug surfaced while wiring this up, worth recording: opencode's plugin loader
+(measured on 1.18.14) calls **every named export** of a file inside a `plugins/`
+directory as if it were a plugin factory, passing it the `PluginInput` object — a
+second named export (e.g. a helper function) gets invoked the same way and throws,
+taking the whole plugin down (and, transitively, the session — an unrelated
+`tool.execute.before`/`experimental.chat.system.transform` hook failing to load
+crashed every prompt in testing). `agent-home-hooks.ts` therefore exports **only**
+`default`; every testable helper lives in `agent-home-hooks-lib.ts`, which is never
+itself placed in a `plugins/` directory. The test suite asserts this shape directly
+so the constraint can't silently regress. Separately, and unrelated to this plugin:
+`session-distill.ts` (Nick's pre-existing, previously-relied-upon opencode plugin)
+also fails to load under this same opencode version with a different error (`{} is
+not iterable`) — a pre-existing opencode/version issue, not something this ticket
+introduced or was in scope to fix.
+
+Verified live against a real `opencode run` session: ponytail injection (model
+reported "Ponytail mode level 'full'"), MEMORY.md auto-load (model quoted a real
+memory-file fact), dedupe-reads (second `Read` of the same file blocked with the
+real script's exact message), security-guidance (pattern warning appeared inline
+in the tool output), and remember capture (prompt + tool lines landed in the
+staging NDJSON). cortex's context.brief fetch was verified by contract/code review
+only — a live check would need the real `CORTEX_API_TOKEN`, which this work
+deliberately never reads or prints.
+
+## Cursor harness (#23)
+
+Cursor is now a wired target: `cursor-agent` (the CLI; installed here via `brew
+install --cask cursor-cli`), `sync.py`, `install.sh`, `port-mcp.py`, a new
+`scripts/port-hooks-cursor.py`, `doctor.sh`, and `history.py` all know about it.
+
+**Instructions and skills.** `sync.py` links `~/.agent-home/AGENTS.md` to
+`~/.cursor/AGENTS.md` and `~/.agents/skills` to `~/.cursor/skills`. The AGENTS.md
+link is a **best-effort global fallback, not a confirmed read path**: `cursor-agent`'s
+own docs confirm it reads `AGENTS.md`/`CLAUDE.md` at a project's root, but say
+nothing about a global `~/.cursor/AGENTS.md`. Cursor's skill docs, by contrast,
+explicitly say it auto-detects `~/.agents/skills` directly — so the skills link is
+belt-and-suspenders, not the only path. Confirming (or ruling out) the global
+AGENTS.md read needs a live `cursor-agent` session; see Manual steps.
+
+**`~/.cursor/skills-cursor` retired.** This was a disjoint, stale skill sync (last
+run mid-June, per its own `.sync-manifest.json`) from before agent-home existed.
+Added `HOME / ".cursor/skills-cursor"` to `sync.py`'s `SKILL_SWEEP` list — the
+same generic "import real skill dirs, never delete the source" mechanism that
+already covers `~/.codex/skills` — and ran it: all 21 of its skills (`automate`,
+`babysit`, `canvas`, `create-hook`, …) were unique (zero name collisions with the
+94 already in the store) and moved into `~/.agent-home/skills/`, so they now travel
+to every harness the same way. Left a `README.md` breadcrumb in the now-empty
+`skills-cursor/` directory explaining the move, per the ticket's "don't delete"
+instruction.
+
+**MCP.** `port-mcp.py` gained `generate_cursor()`/`check_cursor()`, joining the
+same `--check` drift surface `check_opencode()`/`check_codex()` already use, called
+from `apply`/`check` alongside the existing two. Cursor's `~/.cursor/mcp.json` uses
+the `{"mcpServers": {name: {command,args,env}}}` shape for stdio and
+`{"mcpServers": {name: {url,headers}}}` for remote — the same vocabulary Claude's
+own `~/.claude.json` uses, no `"type"` key the way opencode's shape needs. Live-
+verified: `cursor-agent mcp list` (works without login — it's a local read) against
+the generated file printed all 4 canonical servers (`snowflake: ready`, `slack:
+Error: Connection failed`, `imessage: Error: Connection failed`, `cortex:
+requires_authentication`) — proof Cursor's own CLI parses the emitted file
+correctly, even though full connection requires credentials this session never
+touches.
+
+**Hooks.** `scripts/port-hooks-cursor.py` is new: it reads every **enabled**
+vendored plugin's `hooks/hooks.json` (Claude's per-event, grouped-by-matcher
+shape) and flattens it into `~/.cursor/hooks.json` (Cursor's schema-version-1,
+flat-per-event shape: `{"version":1,"hooks":{"<event>":[{"command":"...",
+"matcher":"..."}]}}`, matching the reference `hooks-cursor.json` superpowers
+already ships). Event mapping: `SessionStart→sessionStart`,
+`SessionEnd→sessionEnd`, `UserPromptSubmit→beforeSubmitPrompt`,
+`PreToolUse→preToolUse`, `PostToolUse→postToolUse`, `Stop→stop`,
+`SubagentStop→subagentStop`. `Notification` has no Cursor equivalent and is
+skipped. A hook gated by Claude's `"if"` key (a command-CONTENT matcher — e.g.
+security-guidance's `Bash(git commit:*)` gate on its `PostToolUse` hook) is also
+skipped: Cursor's own `matcher` only matches the tool NAME, so translating one
+would fire the hook on every `Bash` call instead of just commits, which is a
+behavior change, not a port.
+
+Building this surfaced a real, pre-existing vendoring gap, unrelated to Cursor:
+`vendor-plugins.py`'s `CONTENT_DIRS` only copies `skills/hooks/commands/agents`,
+but **two plugins' `hooks.json` reference scripts OUTSIDE those directories** —
+`explanatory-output-style`'s `SessionStart` hook points at
+`hooks-handlers/session-start.sh` (a sibling of `hooks/`, never vendored), and
+`remember`'s `SessionStart`/`UserPromptSubmit`/`PostToolUse` hooks all point at
+`scripts/*.sh` (also never vendored). Every Claude-format hook these two plugins
+ship references a file that doesn't exist anywhere under
+`~/.agent-home/plugins/`. This affects the **existing** `.claude-plugin`/
+`.codex-plugin` shims too (#12/#13), not just this ticket's emitter — it just
+happened to surface here first. `port-hooks-cursor.py` defends itself against it
+(`_missing_referenced_files` skips any command whose referenced path doesn't
+exist on disk, rather than emitting a hook that would silently fail every time it
+fires) but does not fix the underlying vendoring gap — widening `CONTENT_DIRS`
+is a `vendor-plugins.py` change, out of this ticket's scope. Filed as a follow-up
+worth a look, not fixed here. On this machine, filtering these out left 7 working
+hooks across 5 events (`sessionStart`×3, `sessionEnd`×1, `beforeSubmitPrompt`×1,
+`postToolUse`×1, `stop`×1) from cortex, security-guidance, and superpowers —
+explanatory-output-style and remember currently contribute nothing portable to
+Cursor until that gap is closed.
+
+**Vendored AP-layout plugins in Cursor — investigated, not confirmed working.**
+The ticket's problem statement states Cursor "loads [Agent Plugins 1.0.0] without
+changes." A real, cached Cursor marketplace checkout on this machine
+(`~/.cursor/plugins/cache/cursor-public/superpowers/<sha>/`) contradicts that: it
+ships a `.cursor-plugin/plugin.json` manifest, a THIRD manifest directory
+alongside the `.claude-plugin/` and `.codex-plugin/` ours already generates —
+not a `.claude-plugin/` Cursor reads directly. Confirming this needed either (a)
+`cursor-agent plugin marketplace add <gitUrl>`, which requires both an
+authenticated session (`cursor-agent login`, interactive OAuth) and a
+git-clonable URL (not a bare local path — untested whether `file://` works), or
+(b) dropping a plugin into `~/.cursor/plugins/local/` (empty on this machine,
+presumably also wants `.cursor-plugin/plugin.json`) and confirming via the
+Cursor.app GUI (fully interactive, no CLI equivalent found). Neither has a
+non-interactive path, so nothing was attempted live — see Manual steps. Extending
+`vendor-plugins.py` to also generate a `.cursor-plugin/plugin.json` (mechanically
+the same shape as the existing `.codex-plugin` generator) would be the fix if the
+marketplace path turns out to be the one that matters; sizing that is a
+follow-up, not part of this ticket.
+
+**Not done, explicitly out of scope for this ticket:** a `.cursor-plugin`
+manifest generator (see above — investigation only), and any change to
+`vendor-plugins.py`'s `CONTENT_DIRS` (the un-vendored-script gap above).
