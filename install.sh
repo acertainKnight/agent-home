@@ -291,6 +291,12 @@ echo "== 7. Seamless-switching extras =="
 [ -f "$STORE/commands/handoff.md" ] || { cp templates/commands/handoff.md "$STORE/commands/handoff.md"; echo "  + /handoff command (session handoff, works in every harness)"; }
 [ -f "$STORE/models.json" ] || { cp templates/models.example.json "$STORE/models.json"; echo "  + models.json (edit to map model aliases per harness)"; }
 [ -f "$STORE/env" ] || { cp templates/env.example "$STORE/env"; chmod 600 "$STORE/env"; echo "  + env (shared secrets/env for MCPs — add keys there)"; }
+# Third-party models in Claude Code: runtime LiteLLM config + the launcher on PATH.
+[ -f "$STORE/litellm.yaml" ] || { cp litellm/config.yaml "$STORE/litellm.yaml"; echo "  + litellm.yaml (models Claude Code reaches via claude-with)"; }
+if [ -d "$HOME/.local/bin" ]; then
+  ln -sf "$PWD/scripts/claude-with" "$HOME/.local/bin/claude-with"
+  echo "  + claude-with (launch Claude Code on a non-Anthropic model)"
+fi
 # AGENTS.md bridge blocks (handoff/models/history) — idempotent append.
 python3 - <<'PY'
 import os, re

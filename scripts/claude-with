@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Launch Claude Code against a model served by the local LiteLLM proxy.
+#
+#   claude-with kimi                 # start a session on Kimi K2.5
+#   claude-with deepseek --lite      # strip MCP servers first (small-window models)
+#   claude-with --list               # show configured aliases
+#
+# Inside the session, /model <name> switches to any other model the proxy serves:
+# Claude Code skips its model-name check behind a custom ANTHROPIC_BASE_URL.
+set -euo pipefail
+
+STORE="${AGENT_HOME:-$HOME/.agent-home}"
+MODELS="$STORE/models.json"
+CONFIG="${AGENT_HOME_LITELLM_CONFIG:-$STORE/litellm.yaml}"
+PORT="${AGENT_HOME_LITELLM_PORT:-4000}"
+BASE="http://localhost:$PORT"
+LOG="$STORE/.litellm.log"
+
+die() { echo "claude-with: $*" >&2; exit 1; }
+
+resolve() {  # alias -> "model_id<TAB>context_window"
+  python3 - "$MODELS" "$1" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+entry = json.load(open(path)).get("aliases", {}).get(name)
+if not entry or not entry.get("claude-code"):
+    sys.exit(1)
+print(f"{entry['claude-code']}\t{entry.get('context', '')}")
+PY
+}
+
+list_aliases() {
+  python3 - "$MODELS" <<'PY'
+import json, sys
+for name, e in json.load(open(sys.argv[1])).get("aliases", {}).items():
+    model = e.get("claude-code")
+    if model and "/" in model:  # gateway-routed, not a built-in Claude alias
+        print(f"  {name:10} {model:44} {e.get('context', '?')} tokens")
+PY
+}
+
+LITE=0
+ALIAS=""
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --list) echo "Gateway models in $MODELS:"; list_aliases; exit 0 ;;
+    --lite) LITE=1 ;;
+    -*) ARGS+=("$1") ;;
+    *) [ -z "$ALIAS" ] && ALIAS="$1" || ARGS+=("$1") ;;
+  esac
+  shift
+done
+[ -n "$ALIAS" ] || die "usage: claude-with <alias|model-id> [--lite] [claude args...]  (--list to see aliases)"
+
+# An alias resolves through models.json; anything containing "/" is taken as a
+# literal model id so new OpenRouter models work without editing models.json.
+if RESOLVED=$(resolve "$ALIAS"); then
+  MODEL=$(printf '%s' "$RESOLVED" | cut -f1)
+  CONTEXT=$(printf '%s' "$RESOLVED" | cut -f2)
+elif [[ "$ALIAS" == */* ]]; then
+  MODEL="$ALIAS"; CONTEXT=""
+else
+  die "unknown alias '$ALIAS' — run 'claude-with --list', or pass a full model id"
+fi
+
+# Start the proxy if nothing is listening. The chatgpt/* entries block startup on
+# a device login, so they are dropped unless the requested model needs them.
+if ! curl -fsS -m 2 -o /dev/null "$BASE/health/liveliness" 2>/dev/null; then
+  [ -f "$CONFIG" ] || die "no LiteLLM config at $CONFIG"
+  ACTIVE="$CONFIG"
+  if [[ "$MODEL" != chatgpt/* ]]; then
+    ACTIVE="$STORE/.litellm-active.yaml"
+    # LiteLLM's own interpreter is the one guaranteed to have pyyaml.
+    LPY=$(head -1 "$(command -v litellm)" | sed 's/^#!//')
+    [ -x "$LPY" ] || LPY=python3
+    "$LPY" - "$CONFIG" "$ACTIVE" <<'PY'
+import sys, yaml
+src, dst = sys.argv[1], sys.argv[2]
+cfg = yaml.safe_load(open(src)) or {}
+cfg["model_list"] = [m for m in cfg.get("model_list", [])
+                     if not str(m.get("model_name", "")).startswith("chatgpt/")]
+yaml.safe_dump(cfg, open(dst, "w"), sort_keys=False)
+PY
+  fi
+  echo "claude-with: starting LiteLLM on port $PORT..."
+  nohup litellm --config "$ACTIVE" --port "$PORT" >"$LOG" 2>&1 &
+  for _ in $(seq 1 45); do
+    curl -fsS -m 2 -o /dev/null "$BASE/health/liveliness" 2>/dev/null && break
+    sleep 1
+  done
+  curl -fsS -m 2 -o /dev/null "$BASE/health/liveliness" 2>/dev/null || {
+    grep -q 'device code' "$LOG" 2>/dev/null && die "LiteLLM is waiting on the ChatGPT device login. Run it in the foreground once and follow the printed URL:
+  litellm --config $CONFIG"
+    die "LiteLLM did not come up — see $LOG"
+  }
+fi
+
+export ANTHROPIC_BASE_URL="$BASE"
+export ANTHROPIC_AUTH_TOKEN="${AGENT_HOME_LITELLM_KEY:-sk-agent-home}"
+unset ANTHROPIC_API_KEY
+# Non-Anthropic models reject Claude Code's pre-release capability flags with a
+# hard 400, and they read the attribution block as prompt text rather than
+# stripping it the way api.anthropic.com does.
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_CUSTOM_MODEL_OPTION="$MODEL"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="$ALIAS"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="via LiteLLM on port $PORT"
+
+# Without this Claude Code assumes 200k and auto-compacts at the wrong point.
+[ -n "$CONTEXT" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CONTEXT"
+
+if [ "$LITE" = 1 ]; then
+  export CLAUDE_CONFIG_DIR="$STORE/claude-lite"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  ARGS+=(--strict-mcp-config)
+  echo "claude-with: lite profile — no MCP servers, plugins, or hooks"
+elif [ -n "$CONTEXT" ] && [ "$CONTEXT" -lt 200000 ]; then
+  echo "claude-with: $ALIAS has a ${CONTEXT}-token window; MCP tool definitions alone" >&2
+  echo "             run ~135k here. Add --lite if requests come back too long." >&2
+fi
+
+exec claude "${ARGS[@]}"

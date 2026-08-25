@@ -44,6 +44,9 @@ ChatGPT sub ─┬─ Codex CLI (official `codex login`)            ← zero ris
                 │                                    documented enforcement
                 └─→ exposes OpenAI-compatible endpoint → opencode / anything
 OpenRouter ──── opencode (already authed), Codex CLI (custom model_provider)
+Any of the above ── Claude Code, via LiteLLM on ANTHROPIC_BASE_URL (`claude-with
+                    <alias>`); the gateway credential replaces the Max
+                    subscription for that session, so it bills per token
 Cursor sub ──── cursor-agent ONLY (its own account/plan; no subscription
                 logins from other vendors; BYOK = direct API keys, chat-only,
                 OpenRouter/base-URL not officially supported per cursor.com
@@ -61,8 +64,12 @@ Local (Ollama/LM Studio) ── opencode + Codex CLI built-in provider IDs
 - **LiteLLM** (installed via `uv tool install 'litellm[proxy]'`) is the mixing
   board: `chatgpt/*` models on subscription OAuth, `openrouter/*` and local
   models by key/no-auth, one endpoint at `http://localhost:4000`. Config:
-  `litellm/config.yaml` in this repo. Known caveat: the chatgpt provider is
-  newish and community reports flag flakiness (litellm #27175).
+  `litellm/config.yaml` in this repo, copied to `~/.agent-home/litellm.yaml` at
+  install. Known caveat: the chatgpt provider is newish and community reports
+  flag flakiness (litellm #27175). Measured 2026-08-11: the `chatgpt/*` entries
+  trigger their device login during **proxy startup**, not on first request, and
+  block the proxy until it completes — so `claude-with` drops those entries from
+  a generated config unless the requested model is a `chatgpt/` one.
   It also documents forwarding a Claude Max OAuth token
   (`forward_client_headers_to_llm_api: true`) — documented, but Anthropic-side
   ToS exposure is unchanged, so unused here.
@@ -73,8 +80,9 @@ Local (Ollama/LM Studio) ── opencode + Codex CLI built-in provider IDs
 
 ```
 codex login                      # browser OAuth with the ChatGPT account
-litellm --config ~/Documents/python/agent-home/litellm/config.yaml
-# first chatgpt/* request triggers a device-code flow; follow the URL it prints
+litellm --config ~/.agent-home/litellm.yaml
+# prints a device-code URL at startup and waits there; follow it once and the
+# tokens cache, after which the proxy starts unattended
 ```
 
 ## Sources (primary)

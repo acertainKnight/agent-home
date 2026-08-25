@@ -1,9 +1,14 @@
 {
   "_": "Model aliases: one friendly name -> what each harness calls that model. Copied to ~/.agent-home/models.json on install (edit that copy). Consumed by scripts/port-agents.py to map agent `model:` fields, and readable by any agent (AGENTS.md points here) when you name a model by alias.",
+  "__gateway": "Aliases whose claude-code value contains a '/' are served to Claude Code by the LiteLLM proxy — launch them with `claude-with <alias>`. `context` is the model's real input window; Claude Code otherwise assumes 200k and auto-compacts at the wrong point. Claude Code sends ~135k tokens of MCP tool definitions on every request, so anything under ~200k needs `claude-with <alias> --lite`.",
   "aliases": {
-    "opus":   { "claude-code": "opus",   "opencode": "anthropic/claude-opus-4-8" },
-    "sonnet": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5" },
-    "haiku":  { "claude-code": "haiku",  "opencode": "anthropic/claude-haiku-4-5" },
-    "gpt":    { "codex": "gpt-5-codex" }
+    "opus":     { "claude-code": "opus",   "opencode": "anthropic/claude-opus-4-8" },
+    "sonnet":   { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5" },
+    "haiku":    { "claude-code": "haiku",  "opencode": "anthropic/claude-haiku-4-5" },
+    "gpt":      { "claude-code": "chatgpt/gpt-5.4", "opencode": "litellm/chatgpt-codex", "codex": "gpt-5-codex" },
+    "kimi":     { "claude-code": "openrouter/moonshotai/kimi-k2.5",     "opencode": "openrouter/moonshotai/kimi-k2.5",     "context": 262144 },
+    "qwen":     { "claude-code": "openrouter/qwen/qwen3-coder",         "opencode": "openrouter/qwen/qwen3-coder",         "context": 262100 },
+    "deepseek": { "claude-code": "openrouter/deepseek/deepseek-v3.2",   "opencode": "openrouter/deepseek/deepseek-v3.2",   "context": 163840 },
+    "gemini":   { "claude-code": "openrouter/google/gemini-3-pro-preview", "opencode": "openrouter/google/gemini-3-pro-preview", "context": 1048576 }
   }
 }
