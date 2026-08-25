@@ -294,6 +294,11 @@ def _merge_item(item, store, tag):
         (shutil.rmtree if item.is_dir() else lambda p: Path(p).unlink())(item)
     else:
         alt = store / f"{item.stem}.from-{tag}{item.suffix}"
+        if alt.exists():
+            if _same(item, alt):
+                (shutil.rmtree if item.is_dir() else lambda p: Path(p).unlink())(item)
+                return
+            (shutil.rmtree if alt.is_dir() else lambda p: Path(p).unlink())(alt)
         shutil.move(str(item), str(alt))
         print(f"  ! conflict {item.name}: kept as {alt.name} (from {tag})", file=sys.stderr)
 

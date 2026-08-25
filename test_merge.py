@@ -32,6 +32,16 @@ def main():
     assert (store / "b.md").read_text() == "BBB"                       # unioned in
     assert not src.exists()                                            # source consumed
 
+    # re-sweep with the conflict name already taken: identical -> dropped,
+    # different -> refreshes the preserved copy (never nests or crashes)
+    w(src / "a.md", "DIFFERENT")
+    sync.merge_into_store(store, src, "opencode")
+    assert (store / "a.from-opencode.md").read_text() == "DIFFERENT"
+    w(src / "a.md", "NEWER")
+    sync.merge_into_store(store, src, "opencode")
+    assert (store / "a.from-opencode.md").read_text() == "NEWER"
+    assert sorted(p.name for p in store.iterdir()) == ["a.from-opencode.md", "a.md", "b.md", "shared.md"]
+
     # instruction file merge
     ag = tmp / "store" / "AGENTS.md"
     w(ag, "base rules")
