@@ -24,21 +24,36 @@ subscriptions as before, with advance notice promised before the meter lands.
 opencode re-added its native "Log in with Anthropic" accordingly, and a live
 probe on this machine (2026-08-07, `opencode run -m anthropic/claude-haiku-4-5`
 on the Max OAuth credential) was accepted with no restriction error.
-**Current posture: opencode's native Anthropic login is fine to use.** Two
-caveats: (1) when the deferred credit-pool billing activates, third-party
-usage stops drawing the flat Max quota and starts consuming a separate
-metered allowance at API rates — re-evaluate economics then; (2) this policy
-has reversed twice in six months, so Claude Code stays the primary Max
-consumer and heavy automated loops stay in official clients.
+**2026-08-25 reversal: opencode removed the login.** opencode 1.18.15 (the
+auto-updated build on this machine) has no Anthropic subscription login:
+`opencode auth login -p anthropic` goes straight to an API-key prompt, with
+no OAuth method offered (verified by capturing the login screen). The OAuth
+credential from the 2026-08-07 probe expired the same day and, with the
+refresh machinery gone from the build, cannot renew — opencode silently
+drops the whole Anthropic provider, which surfaces as a misleading
+"Model not found: anthropic/…" error rather than an auth error. Community
+reporting attributes the removal to a legal request from Anthropic to the
+opencode maintainers; those accounts date the takedown earlier in 2026 and
+do not fully reconcile with the reinstatement reporting above. What is
+certain is local and verified: this build has no subscription login.
+**Current posture: Claude-on-subscription runs ONLY in Claude Code.**
+Claude models in opencode go through OpenRouter (`openrouter/anthropic/…`,
+per-token) or a console API key (`opencode auth login -p anthropic`,
+per-token). The community plugin opencode-anthropic-auth-community re-adds
+the OAuth flow, but it is exactly what the legal request targeted — account
+risk, do not install without an explicit decision.
 Sources: venturebeat.com (cut-off + reinstatement pieces), zed.dev/blog/
-anthropic-subscription-changes, theregister.com 2026-05-14.
+anthropic-subscription-changes, theregister.com 2026-05-14,
+github.com/thehugeman/opencode-anthropic-auth-community (removal context),
+ridakaddir.com did-anthropic-kill-opencode piece.
 
 ## The architecture
 
 ```
-Claude Max ─┬── Claude Code (official client; personal + work config dirs)
-            └── opencode native "Log in with Anthropic" (reinstated May/Jun 2026;
-                metered credit-pool billing announced but deferred — see above)
+Claude Max ──── Claude Code ONLY (official client; personal + work config dirs).
+                opencode's "Log in with Anthropic" was removed by 1.18.15
+                (2026-08-25); Claude in opencode = OpenRouter or API key,
+                both per-token — see above
 ChatGPT sub ─┬─ Codex CLI (official `codex login`)            ← zero risk
              └─ LiteLLM `chatgpt/` provider (device-code OAuth) ← gray zone, no
                 │                                    documented enforcement
@@ -57,10 +72,12 @@ Local (Ollama/LM Studio) ── opencode + Codex CLI built-in provider IDs
 - **"Run both memberships from one harness"**: Codex CLI is that harness today —
   ChatGPT login natively, plus `model_providers` pointing at any
   OpenAI-compatible endpoint (OpenRouter, LiteLLM, Ollama, LM Studio).
-  opencode matches it natively (`opencode auth login`: OpenRouter, ChatGPT
-  plan, and — since the May/June 2026 reinstatement — Anthropic Pro/Max).
-  The LiteLLM router and the opencode-claude-auth shim are both legacy
-  workarounds from the blocked era: code kept, nothing wired.
+  opencode covers OpenRouter and the ChatGPT plan natively (`opencode auth
+  login`); its Anthropic Pro/Max login existed from the May/June 2026
+  reinstatement until 1.18.15 removed it (2026-08-25) — Anthropic in
+  opencode is now API-key or OpenRouter only. The LiteLLM router and the
+  opencode-claude-auth shim are both legacy workarounds from the blocked
+  era: code kept, nothing wired.
 - **LiteLLM** (installed via `uv tool install 'litellm[proxy]'`) is the mixing
   board: `chatgpt/*` models on subscription OAuth, `openrouter/*` and local
   models by key/no-auth, one endpoint at `http://localhost:4000`. Config:

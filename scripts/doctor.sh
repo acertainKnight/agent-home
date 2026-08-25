@@ -83,9 +83,23 @@ PY
     python3 -c "import json,sys;a=json.load(open('$OC_AUTH'));sys.exit(0 if any(k in a for k in ('openai','chatgpt')) else 1)" 2>/dev/null \
       && ok "opencode: ChatGPT-plan native auth present" \
       || info "opencode: no ChatGPT-plan login (optional — opencode auth login)"
-    python3 -c "import json,sys;sys.exit(0 if 'anthropic' in json.load(open('$OC_AUTH')) else 1)" 2>/dev/null \
-      && ok "opencode: Anthropic native auth present (sanctioned since May/Jun 2026 — see MEMBERSHIPS.md)" \
-      || info "opencode: no Anthropic login (optional — opencode auth login; native flow, no shim)"
+    # Anthropic: opencode 1.18.15 removed the subscription OAuth login
+    # (MEMBERSHIPS.md 2026-08-25) — an oauth entry can no longer refresh, so
+    # presence is not health. Valid states: api key, or no entry at all.
+    ANT_STATE=$(python3 -c "
+import json,sys,time
+a=json.load(open('$OC_AUTH')).get('anthropic')
+if not a: print('ABSENT')
+elif a.get('type')=='oauth':
+    exp=a.get('expires',0)/1000
+    print('OAUTH_EXPIRED' if exp<time.time() else 'OAUTH_LIVE')
+else: print('APIKEY')" 2>/dev/null)
+    case "$ANT_STATE" in
+      APIKEY)        ok "opencode: Anthropic API key present (per-token; subscription login removed in 1.18.15)" ;;
+      OAUTH_EXPIRED) bad "opencode: Anthropic OAuth credential is EXPIRED and cannot refresh (login method removed in opencode 1.18.15) — it silently disables the provider; run: opencode auth logout anthropic, then use OpenRouter or an API key (MEMBERSHIPS.md)" ;;
+      OAUTH_LIVE)    info "opencode: Anthropic OAuth credential still live, but the build cannot refresh it — expect it to die at expiry (MEMBERSHIPS.md 2026-08-25)" ;;
+      *)             info "opencode: no Anthropic credential (Claude via openrouter/anthropic/* models, or opencode auth login -p anthropic for an API key)" ;;
+    esac
   else
     bad "opencode: no $OC_AUTH — run: opencode auth login"
   fi
