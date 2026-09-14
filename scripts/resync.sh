@@ -15,6 +15,7 @@ python3 scripts/port-agents.py
 python3 scripts/port-settings.py capture
 python3 scripts/history.py index
 python3 scripts/history.py latest
+python3 scripts/history.py handoffs
 python3 scripts/distill-codex.py
 python3 scripts/distill-codex-memory.py
 echo "resync complete $(date '+%F %T')"

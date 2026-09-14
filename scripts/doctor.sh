@@ -268,16 +268,16 @@ else
   ok "history index tracks the newest harness transcript"
 fi
 
-# handoff staleness — a handoff written before the most recent indexed
-# session is describing state that's already been superseded.
-HANDOFF="$STORE/handoff.md"
-if [ -f "$HANDOFF" ]; then
-  NEWER=$(find "$STORE/history" -name '*.md' -newer "$HANDOFF" 2>/dev/null | head -1)
-  [ -z "$NEWER" ] \
-    && ok "handoff.md: no newer indexed session" \
-    || info "handoff.md predates a newer indexed session (e.g. $NEWER) — may be stale"
+# open handoffs — one file per session in $STORE/handoffs; an open one older
+# than 7 days is probably finished work nobody closed with `/handoff done`.
+if [ -d "$STORE/handoffs" ]; then
+  OPEN=$(grep -ls '^status: open' "$STORE/handoffs"/*.md 2>/dev/null | grep -vc INDEX.md || true)
+  STALE=$(find "$STORE/handoffs" -name '*.md' ! -name INDEX.md -mtime +7 -exec grep -ls '^status: open' {} + 2>/dev/null | wc -l | tr -d ' ')
+  [ "$STALE" -eq 0 ] \
+    && ok "handoffs: $OPEN open, none older than 7 days" \
+    || info "handoffs: $STALE of $OPEN open handoff(s) older than 7 days — close with /handoff done"
 else
-  info "no handoff.md (written by /handoff)"
+  info "no handoffs dir (written by /handoff)"
 fi
 
 # vendored pipeline freshness — the watcher runs from ~/.agent-home/lib (moved
