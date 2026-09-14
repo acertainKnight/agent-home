@@ -1,0 +1,820 @@
+#!/usr/bin/env python3
+"""claude-account — Claude Code accounts grouped into pools, with automatic
+switching when a subscription limit hits and a mirror of the base directory
+into every account directory.
+
+Accounts are the anthropic-sub entries of $AGENT_HOME/config.json. Each has a
+config_dir, a pool (defaults to the name suffix without a trailing number:
+claude-work-2 -> work) and optional spill_to (pools offered when its own pool
+is exhausted). The default directory (~/.claude) must be launched with
+CLAUDE_CONFIG_DIR unset: set explicitly to that path, Claude Code reads a stub
+account file inside it and reports signed out.
+
+  status                        login, plan and headroom per account
+  pools [--rc]                  pool names (with the Remote Control cwd)
+  pick <pool> [--exclude NAME]  account with the most weekly headroom
+  add <name> --pool <pool>      config.json entry + directory + mirror links
+  mirror [--dry-run]            link every recipe item into each account dir
+  check [--interactive]         names in ~/.claude the recipe has not ruled on
+  share <name> | keep-private <name>
+  run <pool> -- [claude args]   launch Claude on the pool's best account and
+                                relaunch on the next one after a limit handoff
+  limit-hit                     StopFailure hook (stdin JSON)
+  feed -- <status-line cmd>     record rate_limits from the status-line JSON,
+                                then run the original status-line command
+  rc-ensure                     one Remote Control server per pool (launchd)
+  install                       shell lines, settings.json hook + status line,
+                                launch agent, state dir
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+STORE = Path(os.environ.get("AGENT_HOME", HOME / ".agent-home"))
+CONFIG = Path(os.environ.get("AGENT_HOME_CONFIG", STORE / "config.json"))
+RECIPE = STORE / "claude-mirror.json"
+STATE = STORE / "state" / "claude-accounts"
+BASE = Path(os.environ.get("CLAUDE_ACCOUNT_BASE", HOME / ".claude"))
+CLAUDE_BIN = os.environ.get("CLAUDE_ACCOUNT_BIN") or shutil.which("claude") or "claude"
+SCRIPT = Path(__file__).resolve()
+LIMIT_RE = re.compile(r"hit your (session|weekly|opus|sonnet|\w+) limit", re.I)
+RESET_RE = re.compile(r"resets\s+(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", re.I)
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+# ---------------------------------------------------------------- config ----
+
+def load_config():
+    try:
+        return json.load(open(CONFIG))
+    except OSError:
+        return {}
+
+
+def save_config(cfg):
+    tmp = CONFIG.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(CONFIG)
+
+
+def _pool_of(entry):
+    if entry.get("pool"):
+        return entry["pool"]
+    suffix = entry["name"].split("-", 1)[1] if "-" in entry["name"] else entry["name"]
+    return re.sub(r"-\d+$", "", suffix)
+
+
+def accounts(cfg=None):
+    cfg = load_config() if cfg is None else cfg
+    out = []
+    for e in cfg.get("accounts", cfg.get("claude_accounts", [])):
+        if e.get("provider", "anthropic-sub") != "anthropic-sub" or not e.get("config_dir"):
+            continue
+        d = Path(os.path.expanduser(e["config_dir"]))
+        out.append({
+            "name": e["name"], "dir": d, "default": d == BASE, "pool": _pool_of(e),
+            "spill_to": e.get("spill_to", []), "rc_cwd": os.path.expanduser(e.get("rc_cwd", "~")),
+        })
+    return out
+
+
+def by_name(name):
+    for a in accounts():
+        if a["name"] == name or a["name"] == "claude-" + name:
+            return a
+    return None
+
+
+def pools():
+    seen = []
+    for a in accounts():
+        if a["pool"] not in seen:
+            seen.append(a["pool"])
+    return seen
+
+
+def env_for(acct, base=None):
+    env = dict(os.environ if base is None else base)
+    if acct["default"]:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = str(acct["dir"])
+    return env
+
+
+def account_of_env(env=None):
+    env = os.environ if env is None else env
+    d = env.get("CLAUDE_CONFIG_DIR")
+    target = Path(d).expanduser() if d else BASE
+    for a in accounts():
+        if a["dir"] == target:
+            return a
+    return None
+
+
+# ----------------------------------------------------------------- state ----
+
+def _read_json(p):
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(p, data):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(p)
+
+
+def feed_of(name):
+    return _read_json(STATE / "feed" / f"{name}.json")
+
+
+def exhausted_until(name):
+    rec = _read_json(STATE / "exhausted" / f"{name}.json")
+    if rec and rec.get("until", 0) > time.time():
+        return rec["until"]
+    return None
+
+
+def headroom(name):
+    """Weekly headroom in percent, or None when the feed has no reading."""
+    f = feed_of(name)
+    try:
+        return 100 - float(f["rate_limits"]["seven_day"]["used_percentage"])
+    except (TypeError, KeyError, ValueError):
+        return None
+
+
+def pick(pool, exclude=()):
+    """Most weekly headroom in the pool; accounts without a reading keep config
+    order after the ones with a reading. Exhausted and excluded are skipped."""
+    cands = [a for a in accounts() if a["pool"] == pool and a["name"] not in exclude
+             and not exhausted_until(a["name"])]
+    known = [a for a in cands if headroom(a["name"]) is not None]
+    unknown = [a for a in cands if headroom(a["name"]) is None]
+    known.sort(key=lambda a: -headroom(a["name"]))
+    return (known + unknown)[0] if cands else None
+
+
+def parse_reset(text, now=None):
+    """'resets 4:20am' or 'resets Mon 12:00am' -> epoch seconds, local time."""
+    now = now or dt.datetime.now()
+    m = RESET_RE.search(text or "")
+    if not m:
+        return None
+    day, hour, minute, ampm = m.group(1), int(m.group(2)), int(m.group(3) or 0), m.group(4).lower()
+    hour = hour % 12 + (12 if ampm == "pm" else 0)
+    when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if day:
+        ahead = (WEEKDAYS.index(day.lower()[:3]) - now.weekday()) % 7
+        when += dt.timedelta(days=ahead)
+    if when <= now:
+        when += dt.timedelta(days=7 if day else 1)
+    return when.timestamp()
+
+
+# ---------------------------------------------------------------- mirror ----
+
+DEFAULT_RECIPE = {
+    "share": ["agents", "CLAUDE.md", "commands", "file-history", "history.jsonl", "plugins",
+              "projects", "self-optimize", "settings.json", "skills", "workflows"],
+    "private": ["backups", "cache", "chrome", "daemon", "daemon.log", "feedback", "jobs",
+                "paste-cache", "plans", "security", "session-env", "sessions", "shell-snapshots",
+                "stats-cache.json", "tasks", "telemetry", "gh-pr-status-cache.json",
+                "mcp-needs-auth-cache.json", "settings.local.json"],
+    "private_patterns": [r"^\.", r"\.bak", r"\.lock$", r"\.premerge-", r"\.pre-", r"\.log$", r"\.tmp$"],
+}
+
+
+def recipe():
+    r = _read_json(RECIPE)
+    return r if r else dict(DEFAULT_RECIPE)
+
+
+def save_recipe(r):
+    _write_json(RECIPE, r)
+
+
+def unknown_names():
+    r = recipe()
+    pats = [re.compile(p) for p in r.get("private_patterns", [])]
+    out = []
+    for p in sorted(BASE.iterdir()):
+        n = p.name
+        if n in r["share"] or n in r["private"] or any(x.search(n) for x in pats):
+            continue
+        out.append(n)
+    return out
+
+
+def mirror(dry_run=False, only=None):
+    """Link every shared recipe item from the base directory into each
+    non-default account directory. A real file or folder already at the
+    destination is reported, never replaced."""
+    r = recipe()
+    changed = []
+    for a in accounts():
+        if a["default"] or (only and a["name"] != only):
+            continue
+        a["dir"].mkdir(parents=True, exist_ok=True)
+        for item in r["share"]:
+            src, dst = BASE / item, a["dir"] / item
+            if not src.exists():
+                continue
+            if dst.is_symlink():
+                if dst.resolve() == src.resolve():
+                    continue
+                if not dry_run:
+                    dst.unlink()
+            elif dst.exists():
+                print(f"skip {dst}: real {'folder' if dst.is_dir() else 'file'} exists; move it aside to share", file=sys.stderr)
+                continue
+            changed.append((dst, src))
+            if not dry_run:
+                dst.symlink_to(src)
+    for dst, src in changed:
+        print(f"{'would link' if dry_run else 'link'} {dst} -> {src}")
+    return changed
+
+
+def rule(name, share):
+    r = recipe()
+    for key in ("share", "private"):
+        if name in r[key]:
+            r[key].remove(name)
+    r["share" if share else "private"].append(name)
+    save_recipe(r)
+    if share:
+        mirror()
+
+
+def check(interactive):
+    names = unknown_names()
+    if not names:
+        return 0
+    if not interactive:
+        print("not in the mirror recipe (run `claude-account check --interactive`): " + ", ".join(names))
+        return 0
+    for n in names:
+        kind = "folder" if (BASE / n).is_dir() else "file"
+        print(f"\nNew in ~/.claude: {n} ({kind})")
+        print("  1) share with every account\n  2) keep private to each account\n  3) decide later")
+        try:
+            ans = input("  > ").strip()
+        except EOFError:
+            ans = "3"
+        if ans == "1":
+            rule(n, share=True)
+        elif ans == "2":
+            rule(n, share=False)
+    return 0
+
+
+# ------------------------------------------------------------- processes ----
+
+def _ps(args):
+    return subprocess.run(["ps"] + args, capture_output=True, text=True, check=False).stdout
+
+
+def tty_of_pid(pid):
+    t = _ps(["-o", "tty=", "-p", str(pid)]).strip()
+    return None if t in ("", "??") else t
+
+
+def claude_root_on_tty(tty):
+    """The topmost Claude Code process on a terminal: the interactive session,
+    or the `claude rc` server whose --print children serve remote sessions."""
+    rows = []
+    for line in _ps(["-t", tty, "-o", "pid=,ppid=,command="]).splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and ("claude" in parts[2].split()[0] or "/claude/versions/" in parts[2]):
+            rows.append((int(parts[0]), int(parts[1])))
+    pids = {p for p, _ in rows}
+    roots = [p for p, pp in rows if pp not in pids]
+    return min(roots) if roots else None
+
+
+def session_tty():
+    """Terminal of the Claude process that ran this hook (walk up the parents)."""
+    if os.environ.get("CLAUDE_ACCOUNT_TTY"):
+        return os.environ["CLAUDE_ACCOUNT_TTY"]
+    pid = os.getppid()
+    for _ in range(6):
+        t = tty_of_pid(pid)
+        cmd = _ps(["-o", "command=", "-p", str(pid)]).strip()
+        if t and ("claude" in cmd.split()[0] if cmd else False):
+            return t
+        pp = _ps(["-o", "ppid=", "-p", str(pid)]).strip()
+        if not pp or int(pp) <= 1:
+            break
+        pid = int(pp)
+    return tty_of_pid(os.getppid())
+
+
+def my_tty():
+    try:
+        return os.ttyname(sys.stdin.fileno()).replace("/dev/", "")
+    except OSError:
+        return None
+
+
+def handoff_path(tty):
+    return STATE / "handoff" / f"{(tty or 'notty').replace('/', '_')}.json"
+
+
+def notify(text):
+    subprocess.run(["osascript", "-e",
+                    'display notification {} with title "Claude accounts"'.format(json.dumps(text))],
+                   capture_output=True, timeout=10, check=False)
+
+
+# ---------------------------------------------------------------- limit -----
+
+def candidates_for(acct):
+    """Best account per spill pool, for the exhausted-pool picker."""
+    pools_ = []
+    for a in accounts():
+        if a["pool"] == acct["pool"]:
+            for p in a["spill_to"]:
+                if p not in pools_ and p != acct["pool"]:
+                    pools_.append(p)
+    out = []
+    for p in pools_:
+        best = pick(p)
+        if best:
+            out.append({"name": best["name"], "pool": p, "headroom": headroom(best["name"])})
+    return out
+
+
+def limit_hit():
+    payload = _read_json_stdin()
+    text = payload.get("last_assistant_message") or payload.get("error_details") or ""
+    log = STATE / "limit-hits.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as fh:
+        fh.write(json.dumps({"at": time.time(), "env_dir": os.environ.get("CLAUDE_CONFIG_DIR"), **payload}) + "\n")
+    if not LIMIT_RE.search(text):
+        return 0
+    acct = account_of_env()
+    if not acct:
+        return 0
+    until = parse_reset(text) or time.time() + (7 * 86400 if "weekly" in text.lower() else 5 * 3600)
+    _write_json(STATE / "exhausted" / f"{acct['name']}.json", {"until": until, "text": text, "at": time.time()})
+    nxt = pick(acct["pool"], exclude=[acct["name"]])
+    tty = session_tty()
+    session_id = payload.get("session_id")
+    declined = STATE / "declined" / f"{session_id}.json"
+    cands = [] if nxt else candidates_for(acct)
+    if not nxt and (not cands or declined.exists()):
+        return 0  # nothing to switch to: Claude Code's own wait takes over
+    note = {
+        "session_id": session_id, "cwd": payload.get("cwd"), "from": acct["name"], "pool": acct["pool"],
+        "next": nxt["name"] if nxt else None, "candidates": cands, "until": until, "text": text,
+        "created": time.time(),
+    }
+    _write_json(handoff_path(tty), note)
+    notify(f"{acct['name']}: {text.split('·')[0].strip()}. "
+           + (f"Continuing on {nxt['name']}." if nxt else f"{acct['pool']} pool is out; pick another pool in the terminal."))
+    root = claude_root_on_tty(tty) if tty else None
+    if root:
+        os.kill(root, signal.SIGTERM)
+    return 0
+
+
+def _read_json_stdin():
+    try:
+        return json.load(sys.stdin)
+    except ValueError:
+        return {}
+
+
+# ------------------------------------------------------------------ run -----
+
+def _tmux_unattended():
+    if not os.environ.get("TMUX"):
+        return False
+    r = subprocess.run(["tmux", "display", "-p", "#{session_attached}"], capture_output=True, text=True, check=False)
+    return r.stdout.strip() == "0"
+
+
+def _fmt_until(until):
+    return dt.datetime.fromtimestamp(until).strftime("%a %-I:%M%p").lower()
+
+
+def choose_spill(note):
+    """Returns an account, 'wait', or 'quit'."""
+    cands = note["candidates"]
+    lines = [f"{note['pool']} pool is out until {_fmt_until(note['until'])}. Continue this conversation on:"]
+    for i, c in enumerate(cands, 1):
+        h = f"weekly {100 - c['headroom']:.0f}% used" if c["headroom"] is not None else "no reading yet"
+        lines.append(f"  {i}) {c['name']}   ({h})")
+    lines.append(f"  {len(cands) + 1}) wait here for the reset")
+    lines.append(f"  {len(cands) + 2}) quit")
+    prompt = "\n".join(lines)
+    if sys.stdin.isatty() and not _tmux_unattended():
+        print(prompt)
+        try:
+            ans = input("  > ").strip()
+        except EOFError:
+            ans = ""
+    else:
+        ans = imessage_ask(prompt, [c["name"] for c in cands] + ["wait", "quit"])
+    if ans.isdigit() and 1 <= int(ans) <= len(cands):
+        return by_name(cands[int(ans) - 1]["name"])
+    for c in cands:
+        if ans == c["name"] or ans == c["name"].replace("claude-", ""):
+            return by_name(c["name"])
+    if ans == str(len(cands) + 2) or ans == "quit":
+        return "quit"
+    return "wait"
+
+
+def _resume_args(original, session_id):
+    """The relaunch keeps the original flags (with their values) and drops the
+    positional prompt, the `rc` subcommand and any earlier resume flags."""
+    keep, i = [], 0
+    while i < len(original):
+        a = original[i]
+        if a in ("-r", "--resume") and i + 1 < len(original) and not original[i + 1].startswith("-"):
+            i += 2
+            continue
+        if a in ("-c", "--continue", "-r", "--resume", "rc", "remote-control", "--remote-control"):
+            i += 1
+            continue
+        if a.startswith("-"):
+            keep.append(a)
+            if i + 1 < len(original) and not original[i + 1].startswith("-") and "=" not in a:
+                keep.append(original[i + 1])
+                i += 1
+        i += 1
+    rc = any(a in ("rc", "remote-control", "--remote-control") for a in original)
+    return ["--resume", session_id] + (["--remote-control"] if rc else []) + keep
+
+
+def run(pool, args):
+    if pool == "auto":
+        cur = account_of_env()
+        pool = cur["pool"] if cur else pools()[0]
+    attended = sys.stdin.isatty() and not _tmux_unattended() and "rc" not in args
+    check(interactive=attended)
+    acct = pick(pool)
+    if not acct:
+        members = [a for a in accounts() if a["pool"] == pool]
+        if not members:
+            print(f"no accounts in pool {pool}", file=sys.stderr)
+            return 1
+        note = {"pool": pool, "from": members[0]["name"],
+                "until": max([exhausted_until(a["name"]) or 0 for a in members] + [time.time()]),
+                "candidates": candidates_for(members[0])}
+        choice = choose_spill(note) if note["candidates"] else "wait"
+        if choice == "quit":
+            return 1
+        acct = members[0] if choice == "wait" else choice
+    tty = my_tty()
+    while True:
+        env = env_for(acct)
+        print(f"[claude-account] {acct['name']} ({acct['pool']})", file=sys.stderr)
+        code = subprocess.call([CLAUDE_BIN] + args, env=env)
+        note = _read_json(handoff_path(tty))
+        if not note or note.get("created", 0) < time.time() - 600:
+            return code
+        handoff_path(tty).unlink(missing_ok=True)
+        if note.get("next"):
+            acct = by_name(note["next"])
+        else:
+            choice = choose_spill(note)
+            if choice == "quit":
+                return code
+            if choice == "wait":
+                _write_json(STATE / "declined" / f"{note['session_id']}.json", {"at": time.time()})
+                acct = by_name(note["from"])
+            else:
+                acct = choice
+        args = _resume_args(args, note["session_id"])
+
+
+# ------------------------------------------------------------- imessage -----
+
+def _chat_guid():
+    try:
+        text = (STORE / "instance.yaml").read_text()
+        m = re.search(r'^\s*chat:\s*"([^"]+)"', text, re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def _decode_body(blob):
+    if not blob:
+        return ""
+    i = blob.find(b"NSString")
+    if i < 0:
+        return ""
+    j = blob.find(b"+", i)
+    if j < 0:
+        return ""
+    k = j + 1
+    length = blob[k]
+    k += 1
+    if length == 0x81:
+        length = int.from_bytes(blob[k:k + 2], "little")
+        k += 2
+    return blob[k:k + length].decode("utf-8", "replace")
+
+
+def imessage_ask(question, answers, timeout=1800):
+    """Send the question to the self chat and wait for a reply that names one
+    of the answers (or its number). Returns '' on timeout."""
+    guid = _chat_guid()
+    if not guid:
+        return ""
+    handle = guid.split(";")[-1]
+    numbered = question + "\nReply with a number or a name."
+    subprocess.run(["osascript", "-e", "on run argv", "-e",
+                    'tell application "Messages" to send (item 1 of argv) to chat id (item 2 of argv)',
+                    "-e", "end run", numbered, guid], capture_output=True, timeout=20, check=False)
+    sent_at = time.time()
+    db = HOME / "Library/Messages/chat.db"
+    deadline = sent_at + timeout
+    while time.time() < deadline:
+        time.sleep(15)
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            rows = con.execute(
+                "select m.text, m.attributedBody, m.date from message m "
+                "join chat_message_join j on j.message_id=m.ROWID join chat c on c.ROWID=j.chat_id "
+                "where c.chat_identifier=? and m.is_from_me=1 order by m.date desc limit 5", (handle,)).fetchall()
+            con.close()
+        except sqlite3.Error:
+            return ""
+        for text, body, date in rows:
+            when = date / 1e9 + 978307200
+            if when <= sent_at + 2:
+                continue
+            reply = (text or _decode_body(body) or "").strip().lower()
+            if reply == numbered.strip().lower():
+                continue
+            for i, a in enumerate(answers, 1):
+                if reply in (str(i), a.lower(), a.lower().replace("claude-", "")):
+                    return str(i) if reply == str(i) else a
+    return ""
+
+
+# ---------------------------------------------------------------- feed ------
+
+def feed(cmd):
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw)
+        acct = account_of_env()
+        if acct and data.get("rate_limits"):
+            _write_json(STATE / "feed" / f"{acct['name']}.json",
+                        {"rate_limits": data["rate_limits"], "at": time.time()})
+            until = None
+            for w in ("five_hour", "seven_day"):
+                win = data["rate_limits"].get(w) or {}
+                if win.get("used_percentage", 0) >= 100 and win.get("resets_at", 0) > time.time():
+                    until = max(until or 0, win["resets_at"])
+            if until:
+                _write_json(STATE / "exhausted" / f"{acct['name']}.json",
+                            {"until": until, "text": "status line: window at 100%", "at": time.time()})
+            elif exhausted_until(acct["name"]):
+                (STATE / "exhausted" / f"{acct['name']}.json").unlink(missing_ok=True)
+    except ValueError:
+        pass
+    if cmd:
+        return subprocess.run(cmd, input=raw, text=True, check=False).returncode
+    return 0
+
+
+# ---------------------------------------------------------------- status ----
+
+def auth_status(acct):
+    r = subprocess.run([CLAUDE_BIN, "auth", "status"], env=env_for(acct), capture_output=True, text=True,
+                       timeout=30, check=False)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def status():
+    for a in accounts():
+        s = auth_status(a)
+        login = f"{s.get('email')} ({s.get('subscriptionType')})" if s.get("loggedIn") else "NOT LOGGED IN"
+        h = headroom(a["name"])
+        f = feed_of(a["name"])
+        age = f" {int((time.time() - f['at']) / 60)}m ago" if f else ""
+        room = f"weekly headroom {h:.0f}%{age}" if h is not None else "no reading yet"
+        ex = exhausted_until(a["name"])
+        flag = f"  EXHAUSTED until {_fmt_until(ex)}" if ex else ""
+        print(f"{a['name']:<18} pool={a['pool']:<9} {str(a['dir']):<28} {login:<36} {room}{flag}")
+    print("unknown in ~/.claude: " + (", ".join(unknown_names()) or "none"))
+
+
+# ------------------------------------------------------------------ add -----
+
+def add(name, pool, rc_cwd):
+    cfg = load_config()
+    full = name if name.startswith("claude-") else "claude-" + name
+    suffix = full[len("claude-"):]
+    if by_name(full):
+        print(f"{full} already exists", file=sys.stderr)
+        return 1
+    d = HOME / f".claude-{suffix}"
+    entry = {"name": full, "provider": "anthropic-sub", "config_dir": "~/" + d.name, "keychain": None, "pool": pool}
+    if rc_cwd:
+        entry["rc_cwd"] = rc_cwd
+    cfg.setdefault("accounts", []).append(entry)
+    save_config(cfg)
+    d.mkdir(exist_ok=True)
+    mirror(only=full)
+    print(f"\n{full} added on pool {pool} at {d}. Sign it in once:\n  CLAUDE_CONFIG_DIR={d} claude\nthen /login. Never /logout there; it wipes the MCP logins too.")
+    return 0
+
+
+# ------------------------------------------------------------ rc-ensure -----
+
+def rc_ensure():
+    """One Remote Control server per pool, in tmux socket 'rc'. A server
+    started by hand on any account of the pool counts."""
+    running = {}
+    for line in _ps(["-axo", "pid=,command="]).splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1].endswith("claude") and parts[2] in ("rc", "remote-control"):
+            envs = _ps(["-Eww", "-o", "command=", "-p", parts[0]]).split()
+            d = next((e[len("CLAUDE_CONFIG_DIR="):] for e in envs if e.startswith("CLAUDE_CONFIG_DIR=")), str(BASE))
+            running[Path(d)] = parts[0]
+    stamp = time.strftime("%F %T")
+    for pool in pools():
+        members = [a for a in accounts() if a["pool"] == pool]
+        if any(a["dir"] in running for a in members):
+            print(f"{stamp} {pool}: running")
+            continue
+        acct = pick(pool) or members[0]
+        print(f"{stamp} {pool}: starting {acct['name']} in {acct['rc_cwd']}")
+        subprocess.run(["tmux", "-L", "rc", "new-session", "-d", "-s", pool, "-c", acct["rc_cwd"],
+                        f"exec {SCRIPT} run {pool} -- rc"], check=False)
+    return 0
+
+
+# -------------------------------------------------------------- install -----
+
+ZSH_LINE = 'source "$HOME/.agent-home/lib/scripts/claude-accounts.zsh"  # claude-account: pools + switching'
+PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agent-home.claude-rc</string>
+  <key>ProgramArguments</key><array>
+    <string>{script}</string><string>rc-ensure</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>StandardOutPath</key><string>{home}/Library/Logs/claude-rc-ensure.log</string>
+  <key>StandardErrorPath</key><string>{home}/Library/Logs/claude-rc-ensure.log</string>
+</dict></plist>
+"""
+
+
+def _ensure_line(path, line, marker):
+    text = path.read_text() if path.exists() else ""
+    if marker in text:
+        return False
+    with open(path, "a") as fh:
+        fh.write(("\n" if text and not text.endswith("\n") else "") + line + "\n")
+    return True
+
+
+def install():
+    STATE.mkdir(parents=True, exist_ok=True)
+    _ensure_line(STORE / ".gitignore", "state/", "state/")
+    if not RECIPE.exists():
+        save_recipe(dict(DEFAULT_RECIPE))
+    # shell
+    zshrc = HOME / ".zshrc"
+    text = zshrc.read_text() if zshrc.exists() else ""
+    text2 = re.sub(r"^work(1h)?\(\) \{ cd ~/dev && claude(1h)? \"\$@\"; \}\n", "", text, flags=re.M)
+    if text2 != text:
+        zshrc.write_text(text2)
+        print("zshrc: removed the old work/work1h functions (the snippet defines them)")
+    if _ensure_line(zshrc, ZSH_LINE, "claude-accounts.zsh"):
+        print("zshrc: added the claude-accounts snippet")
+    # settings.json: StopFailure hook + status-line feed
+    settings = BASE / "settings.json"
+    s = _read_json(settings) or {}
+    backups = STORE / "backups"
+    backups.mkdir(exist_ok=True)
+    shutil.copy2(settings, backups / f"settings.json.{int(time.time())}")
+    hooks = s.setdefault("hooks", {})
+    cmd = f'"{SCRIPT}" limit-hit'
+    if not any(cmd in h.get("command", "") for r in hooks.get("StopFailure", []) for h in r.get("hooks", [])):
+        hooks.setdefault("StopFailure", []).append({"hooks": [{"type": "command", "command": cmd}]})
+        print("settings.json: StopFailure hook added")
+    sl = s.get("statusLine") or {}
+    if sl.get("type") == "command" and "claude-account" not in sl.get("command", ""):
+        sl["command"] = f'"{SCRIPT}" feed -- {sl["command"]}'
+        s["statusLine"] = sl
+        print("settings.json: status line wrapped by the headroom feed")
+    _write_json(settings, s)
+    # Remote Control launch agent
+    plist = HOME / "Library/LaunchAgents/com.agent-home.claude-rc.plist"
+    plist.write_text(PLIST.format(script=SCRIPT, home=HOME))
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/com.agent-home.claude-rc"], capture_output=True, check=False)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, check=False)
+    print("launch agent com.agent-home.claude-rc (re)loaded")
+    mirror()
+    print("\nAccounts:")
+    status()
+    print("\nSign in any account marked NOT LOGGED IN (run `claude` there, then /login).")
+    return 0
+
+
+# ----------------------------------------------------------------- main -----
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="claude-account", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    sp = sub.add_parser("pools")
+    sp.add_argument("--rc", action="store_true")
+    sp = sub.add_parser("pick")
+    sp.add_argument("pool")
+    sp.add_argument("--exclude", action="append", default=[])
+    sp = sub.add_parser("add")
+    sp.add_argument("name")
+    sp.add_argument("--pool", required=True)
+    sp.add_argument("--rc-cwd", default=None)
+    sp = sub.add_parser("mirror")
+    sp.add_argument("--dry-run", action="store_true")
+    sp = sub.add_parser("check")
+    sp.add_argument("--interactive", action="store_true")
+    for v in ("share", "keep-private"):
+        sub.add_parser(v).add_argument("name")
+    sp = sub.add_parser("run")
+    sp.add_argument("pool")
+    sp.add_argument("args", nargs=argparse.REMAINDER)
+    sub.add_parser("limit-hit")
+    sp = sub.add_parser("feed")
+    sp.add_argument("args", nargs=argparse.REMAINDER)
+    sub.add_parser("rc-ensure")
+    sub.add_parser("install")
+    a = p.parse_args(argv)
+
+    if a.cmd == "status":
+        status()
+    elif a.cmd == "pools":
+        for pool in pools():
+            acct = pick(pool) or next(x for x in accounts() if x["pool"] == pool)
+            print(f"{pool}\t{acct['rc_cwd']}" if a.rc else pool)
+    elif a.cmd == "pick":
+        acct = pick(a.pool, exclude=a.exclude)
+        if not acct:
+            print(f"no account with headroom in pool {a.pool}", file=sys.stderr)
+            return 1
+        print(f"{acct['name']}\t{'-' if acct['default'] else acct['dir']}")
+    elif a.cmd == "add":
+        return add(a.name, a.pool, a.rc_cwd)
+    elif a.cmd == "mirror":
+        mirror(dry_run=a.dry_run)
+    elif a.cmd == "check":
+        return check(a.interactive)
+    elif a.cmd == "share":
+        rule(a.name, share=True)
+    elif a.cmd == "keep-private":
+        rule(a.name, share=False)
+    elif a.cmd == "run":
+        args = a.args[1:] if a.args[:1] == ["--"] else a.args
+        return run(a.pool, args)
+    elif a.cmd == "limit-hit":
+        return limit_hit()
+    elif a.cmd == "feed":
+        args = a.args[1:] if a.args[:1] == ["--"] else a.args
+        return feed(args)
+    elif a.cmd == "rc-ensure":
+        return rc_ensure()
+    elif a.cmd == "install":
+        return install()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]) or 0)

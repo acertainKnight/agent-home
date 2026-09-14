@@ -184,6 +184,28 @@ between them in any harness. `anthropic-sub` accounts point at a `CLAUDE_CONFIG_
 each get their own token dir + LiteLLM port, `openai-key` accounts a key + base URL.
 Full per-provider switching guide in MEMBERSHIPS.md.
 
+### Claude accounts: pools and automatic switching
+
+`scripts/claude-account` treats the anthropic-sub entries of `config.json` as
+accounts grouped into pools (`pool`, default: the name suffix, so
+`claude-work-2` is in `work`). `~/.claude` is the default account and is always
+launched with `CLAUDE_CONFIG_DIR` unset; every other account is a directory
+that mirrors `~/.claude` by symlink (recipe: `~/.agent-home/claude-mirror.json`).
+
+- `claude-account install` writes the shell snippet (`claude`, `work`, `work1h`
+  become wrappers), the `StopFailure` hook and the status-line feed into
+  `~/.claude/settings.json`, and the Remote Control launch agent.
+- `claude-account add work-2 --pool work` creates the directory with all mirror
+  links; then run Claude there once and `/login`.
+- Every launch checks `~/.claude` for names the recipe has not ruled on and asks
+  share / keep private / later. `sync.py` re-links the mirror on each run.
+- On a usage limit the hook records the account as exhausted, picks the pool's
+  account with the most weekly headroom (from the status-line feed), ends the
+  limited process, and the wrapper relaunches with `--resume <id>`. When the
+  pool is out, a terminal picker (or an iMessage question when nobody is at the
+  terminal) offers the `spill_to` pools, the built-in wait, or quit.
+- `claude-account status` shows login, plan, headroom and exhaustion per account.
+
 ### Proving it's the membership, not API credits
 
 `scripts/verify-claude-membership.sh [account]` reads that account's OAuth token

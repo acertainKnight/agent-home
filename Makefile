@@ -33,8 +33,9 @@ verify:  ## prove an account runs on membership, not API credits (ACCOUNT=name)
 test-ownership:  ## prove the store owns its content (env-override, no live renames)
 	python3 test_ownership.py
 
-test:  ## run the merge-engine self-check
+test:  ## run the merge-engine and claude-account self-checks
 	@python3 test_merge.py
+	@python3 test_claude_account.py
 
 plugins:  ## vendor enabled Claude plugins into ~/.agent-home/plugins (never overwrites an already-vendored plugin)
 	@python3 scripts/vendor-plugins.py

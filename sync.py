@@ -14,6 +14,7 @@ import filecmp
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,12 +38,10 @@ HARNESSES = {
         (CANON / "AGENTS.md", HOME / ".claude/CLAUDE.md"),
         (CANON / "remember", HOME / ".remember"),
     ],
-    # Second Claude Code profile (e.g. work). Shares ~/.claude/skills already.
-    "claude-code-work": [
-        (CANON / "workflows", HOME / ".claude-work/workflows"),
-        (CANON / "AGENTS.md", HOME / ".claude-work/CLAUDE.md"),
-        (CANON / "commands", HOME / ".claude-work/commands"),
-    ],
+    # Other Claude Code account directories (~/.claude-work, ~/.claude-work-2,
+    # ...) are mirrors of ~/.claude, linked by `scripts/claude-account mirror`
+    # from the accounts list in config.json and the recipe in claude-mirror.json.
+    "claude-code-work": [],
     # opencode: reads ~/.config/opencode/AGENTS.md, its own command/ dir (pointed
     # at the generated shared-command library so plugin commands port too), and
     # skills via skills.paths in opencode.jsonc (wire-opencode.py).
@@ -387,6 +386,8 @@ def apply():
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.symlink_to(src)
         print(f"link {dst} -> {src}")
+    if "claude-code" in target_names():
+        subprocess.run([sys.executable, str(REPO / "scripts" / "claude-account"), "mirror"], check=False)
 
 
 if __name__ == "__main__":
