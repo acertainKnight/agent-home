@@ -195,8 +195,10 @@ that mirrors `~/.claude` by symlink (recipe: `~/.agent-home/claude-mirror.json`)
 - `claude-account install` writes the shell snippet (`claude`, `work`, `work1h`
   become wrappers), the `StopFailure` hook and the status-line feed into
   `~/.claude/settings.json`, and the Remote Control launch agent.
-- `claude-account add work-2 --pool work` creates the directory with all mirror
-  links; then run Claude there once and `/login`.
+- `claude-account login` signs in a new account end to end: it asks for the pool,
+  names and creates the directory with all mirror links, runs Claude's own
+  `auth login`, and records the email and plan in `config.json`.
+  `claude-account login <name>` re-signs an existing account.
 - Every launch checks `~/.claude` for names the recipe has not ruled on and asks
   share / keep private / later. `sync.py` re-links the mirror on each run.
 - On a usage limit the hook records the account as exhausted, picks the pool's

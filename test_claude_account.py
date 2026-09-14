@@ -89,3 +89,18 @@ assert ca.env_for(ca.by_name("claude-work"), {})["CLAUDE_CONFIG_DIR"] == str(d /
 assert ca.account_of_env({})["name"] == "claude-personal"
 assert ca.account_of_env({"CLAUDE_CONFIG_DIR": str(d / ".claude-work-2")})["name"] == "claude-work-2"
 print("claude-account self-check ok")
+
+# login: a new account gets pool, directory, mirror links and the email/plan recorded
+stub = d / "claude-stub"
+stub.write_text('#!/bin/bash\nif [ "$1 $2" = "auth status" ]; then echo \'{"loggedIn": true, "email": "third@example.com", "subscriptionType": "max"}\'; fi\nexit 0\n')
+stub.chmod(0o755)
+ca.CLAUDE_BIN = str(stub)
+assert ca._next_name("work") == "claude-work-3"
+assert ca._next_name("consulting") == "claude-consulting"
+assert ca.login(None, "work") == 0
+entry = next(e for e in json.load(open(d / ".agent-home/config.json"))["accounts"] if e["name"] == "claude-work-3")
+assert entry["login"] == "third@example.com" and entry["plan"] == "max" and entry["pool"] == "work", entry
+assert entry["spill_to"] == ["personal"]  # inherited from the pool's siblings
+assert (d / ".claude-work-3/projects").resolve() == (d / ".claude/projects").resolve()
+assert ca.login("claude-work-3", None) == 0  # re-sign an existing account
+print("login self-check ok")

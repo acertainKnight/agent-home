@@ -13,7 +13,10 @@ account file inside it and reports signed out.
   status                        login, plan and headroom per account
   pools [--rc]                  pool names (with the Remote Control cwd)
   pick <pool> [--exclude NAME]  account with the most weekly headroom
-  add <name> --pool <pool>      config.json entry + directory + mirror links
+  login [name] [--pool <pool>]  sign in: a new account gets its pool, directory,
+                                mirror links and config entry around Claude's
+                                own `auth login`; an existing name re-signs
+  add <name> --pool <pool>      same as login for a new account
   mirror [--dry-run]            link every recipe item into each account dir
   check [--interactive]         names in ~/.claude the recipe has not ruled on
   share <name> | keep-private <name>
@@ -627,24 +630,99 @@ def status():
     print("unknown in ~/.claude: " + (", ".join(unknown_names()) or "none"))
 
 
-# ------------------------------------------------------------------ add -----
+# ---------------------------------------------------------------- login -----
 
-def add(name, pool, rc_cwd):
+def _ask_pool():
+    have = pools()
+    if not sys.stdin.isatty():
+        print("no terminal: pass --pool", file=sys.stderr)
+        return None
+    print("Which pool is this account for?")
+    for i, p in enumerate(have, 1):
+        print(f"  {i}) {p}")
+    print(f"  {len(have) + 1}) a new pool")
+    try:
+        ans = input("  > ").strip()
+    except EOFError:
+        return None
+    if ans.isdigit() and 1 <= int(ans) <= len(have):
+        return have[int(ans) - 1]
+    if ans in have:
+        return ans
+    try:
+        new = ans if ans and not ans.isdigit() else input("  new pool name: ").strip()
+    except EOFError:
+        return None
+    return new or None
+
+
+def _next_name(pool):
+    taken = {a["name"] for a in accounts()}
+    if f"claude-{pool}" not in taken:
+        return f"claude-{pool}"
+    n = 2
+    while f"claude-{pool}-{n}" in taken:
+        n += 1
+    return f"claude-{pool}-{n}"
+
+
+def create(name, pool, rc_cwd=None):
+    """New account entry in config.json, its directory and mirror links."""
     cfg = load_config()
     full = name if name.startswith("claude-") else "claude-" + name
-    suffix = full[len("claude-"):]
     if by_name(full):
         print(f"{full} already exists", file=sys.stderr)
-        return 1
-    d = HOME / f".claude-{suffix}"
-    entry = {"name": full, "provider": "anthropic-sub", "config_dir": "~/" + d.name, "keychain": None, "pool": pool}
-    if rc_cwd:
-        entry["rc_cwd"] = rc_cwd
+        return None
+    d = BASE.parent / f".claude-{full[len('claude-'):]}"
+    siblings = [a for a in accounts() if a["pool"] == pool]
+    config_dir = "~/" + d.name if d.parent == HOME else str(d)
+    entry = {"name": full, "provider": "anthropic-sub", "config_dir": config_dir, "keychain": None,
+             "pool": pool, "spill_to": siblings[0]["spill_to"] if siblings else []}
+    entry["rc_cwd"] = rc_cwd or (siblings[0]["rc_cwd"] if siblings else None) or "~"
+    if entry["rc_cwd"].startswith(str(HOME)):
+        entry["rc_cwd"] = "~" + entry["rc_cwd"][len(str(HOME)):]
     cfg.setdefault("accounts", []).append(entry)
     save_config(cfg)
     d.mkdir(exist_ok=True)
     mirror(only=full)
-    print(f"\n{full} added on pool {pool} at {d}. Sign it in once:\n  CLAUDE_CONFIG_DIR={d} claude\nthen /login. Never /logout there; it wipes the MCP logins too.")
+    print(f"{full}: created {d} on pool {pool} with the mirror links")
+    return by_name(full)
+
+
+def record_login(acct):
+    s = auth_status(acct)
+    if not s.get("loggedIn"):
+        return None
+    cfg = load_config()
+    for e in cfg.get("accounts", []):
+        if e.get("name") == acct["name"]:
+            e["login"] = s.get("email")
+            e["plan"] = s.get("subscriptionType")
+    save_config(cfg)
+    return s
+
+
+def login(name=None, pool=None, rc_cwd=None):
+    """Claude's own login flow, with the bookkeeping around it. An existing
+    name re-signs that directory. Otherwise a new account: pool, directory,
+    mirror links, config entry, then `claude auth login` and the email and
+    plan it reports are recorded."""
+    acct = by_name(name) if name else None
+    if not acct:
+        pool = pool or _ask_pool()
+        if not pool:
+            return 1
+        acct = create(name or _next_name(pool), pool, rc_cwd)
+        if not acct:
+            return 1
+    print(f"Signing in {acct['name']} at {acct['dir']}. Finish the login in the browser window.")
+    subprocess.call([CLAUDE_BIN, "auth", "login"], env=env_for(acct))
+    s = record_login(acct)
+    if not s:
+        print(f"{acct['name']}: login did not complete; run `claude-account login {acct['name']}` to retry", file=sys.stderr)
+        return 1
+    print(f"{acct['name']} is {s.get('email')} ({s.get('subscriptionType')}) on pool {acct['pool']}. "
+          f"Open Claude in the folders you use once to accept the workspace trust prompt.")
     return 0
 
 
@@ -759,10 +837,11 @@ def main(argv):
     sp = sub.add_parser("pick")
     sp.add_argument("pool")
     sp.add_argument("--exclude", action="append", default=[])
-    sp = sub.add_parser("add")
-    sp.add_argument("name")
-    sp.add_argument("--pool", required=True)
-    sp.add_argument("--rc-cwd", default=None)
+    for v in ("login", "add"):
+        sp = sub.add_parser(v)
+        sp.add_argument("name", nargs="?" if v == "login" else None)
+        sp.add_argument("--pool", default=None)
+        sp.add_argument("--rc-cwd", default=None)
     sp = sub.add_parser("mirror")
     sp.add_argument("--dry-run", action="store_true")
     sp = sub.add_parser("check")
@@ -791,8 +870,8 @@ def main(argv):
             print(f"no account with headroom in pool {a.pool}", file=sys.stderr)
             return 1
         print(f"{acct['name']}\t{'-' if acct['default'] else acct['dir']}")
-    elif a.cmd == "add":
-        return add(a.name, a.pool, a.rc_cwd)
+    elif a.cmd in ("add", "login"):
+        return login(a.name, a.pool, a.rc_cwd)
     elif a.cmd == "mirror":
         mirror(dry_run=a.dry_run)
     elif a.cmd == "check":
