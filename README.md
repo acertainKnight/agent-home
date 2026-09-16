@@ -201,12 +201,18 @@ that mirrors `~/.claude` by symlink (recipe: `~/.agent-home/claude-mirror.json`)
   `claude-account login <name>` re-signs an existing account.
 - Every launch checks `~/.claude` for names the recipe has not ruled on and asks
   share / keep private / later. `sync.py` re-links the mirror on each run.
-- On a usage limit the hook records the account as exhausted, picks the pool's
-  account with the most weekly headroom (from the status-line feed), ends the
-  limited process, and the wrapper relaunches with `--resume <id>`. When the
-  pool is out, a terminal picker (or an iMessage question when nobody is at the
-  terminal) offers the `spill_to` pools, the built-in wait, or quit.
-- `claude-account status` shows login, plan, headroom and exhaustion per account.
+- A pool drains its accounts in `config.json` order: every launch takes the
+  first account that is not marked exhausted. `claude-account prefer <name>`
+  moves an account to the front of its pool.
+- On a usage limit the hook records the account as exhausted until the reset
+  time in the limit message, ends the limited process, and the wrapper
+  relaunches on the next account with `--resume <id>`. The status-line feed
+  also marks an account exhausted when a window reads 100% and clears the mark
+  once it reads under. When the pool is out, a terminal picker (or an iMessage
+  question when nobody is at the terminal) offers the `spill_to` pools, the
+  built-in wait, or quit.
+- `claude-account status` shows login, plan, headroom and exhaustion per account
+  in pool order. `claude-account clear <name>` drops a wrong exhausted mark.
 
 ### Proving it's the membership, not API credits
 

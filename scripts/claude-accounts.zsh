@@ -1,6 +1,6 @@
 # Sourced from ~/.zshrc by `claude-account install`.
-# `claude` and `work` go through claude-account, which picks the pool's account
-# with the most headroom, checks ~/.claude for names the mirror recipe has not
+# `claude` and `work` go through claude-account, which picks the pool's first account
+# in config order that is not exhausted, checks ~/.claude for names the mirror recipe has not
 # ruled on, and relaunches the conversation on the next account after a limit.
 # Plain `claude` uses the pool of the account CLAUDE_CONFIG_DIR names (direnv
 # in ~/dev sets the work directory), else the first pool in config.json.

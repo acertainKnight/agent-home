@@ -10,9 +10,11 @@ is exhausted). The default directory (~/.claude) must be launched with
 CLAUDE_CONFIG_DIR unset: set explicitly to that path, Claude Code reads a stub
 account file inside it and reports signed out.
 
-  status                        login, plan and headroom per account
+  status                        login, plan, headroom and pool order per account
   pools [--rc]                  pool names (with the Remote Control cwd)
-  pick <pool> [--exclude NAME]  account with the most weekly headroom
+  pick <pool> [--exclude NAME]  first account in config order that is not exhausted
+  prefer <name>                 move an account to the front of its pool
+  clear <name>                  drop an account's exhausted mark
   login [name] [--pool <pool>]  sign in: a new account gets its pool, directory,
                                 mirror links and config entry around Claude's
                                 own `auth login`; an existing name re-signs
@@ -51,8 +53,11 @@ BASE = Path(os.environ.get("CLAUDE_ACCOUNT_BASE", HOME / ".claude"))
 CLAUDE_BIN = os.environ.get("CLAUDE_ACCOUNT_BIN") or shutil.which("claude") or "claude"
 SCRIPT = Path(__file__).resolve()
 LIMIT_RE = re.compile(r"hit your (session|weekly|opus|sonnet|\w+) limit", re.I)
-RESET_RE = re.compile(r"resets\s+(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", re.I)
+RESET_RE = re.compile(r"resets\s+(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+)?"
+                      r"(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2}),?\s+at\s+)?"
+                      r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", re.I)
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
 
 # ---------------------------------------------------------------- config ----
@@ -162,25 +167,57 @@ def headroom(name):
 
 
 def pick(pool, exclude=()):
-    """Most weekly headroom in the pool; accounts without a reading keep config
-    order after the ones with a reading. Exhausted and excluded are skipped."""
+    """First account of the pool in config order that is neither exhausted nor
+    excluded: the pool drains its accounts one at a time, so the first one
+    reaches its reset while the later ones still hold their full window."""
     cands = [a for a in accounts() if a["pool"] == pool and a["name"] not in exclude
              and not exhausted_until(a["name"])]
-    known = [a for a in cands if headroom(a["name"]) is not None]
-    unknown = [a for a in cands if headroom(a["name"]) is None]
-    known.sort(key=lambda a: -headroom(a["name"]))
-    return (known + unknown)[0] if cands else None
+    return cands[0] if cands else None
+
+
+def prefer(name):
+    """Move the account to the front of its pool in config.json."""
+    acct = by_name(name)
+    if not acct:
+        print(f"no account named {name}", file=sys.stderr)
+        return 1
+    cfg = load_config()
+    entries = cfg.get("accounts", [])
+    idx = next(i for i, e in enumerate(entries) if e.get("name") == acct["name"])
+    first = next(i for i, e in enumerate(entries) if _pool_of(e) == acct["pool"])
+    entries.insert(first, entries.pop(idx))
+    save_config(cfg)
+    order = [a["name"] for a in accounts() if a["pool"] == acct["pool"]]
+    print(f"{acct['pool']} pool order: " + " > ".join(order))
+    return 0
+
+
+def clear(name):
+    acct = by_name(name)
+    if not acct:
+        print(f"no account named {name}", file=sys.stderr)
+        return 1
+    (STATE / "exhausted" / f"{acct['name']}.json").unlink(missing_ok=True)
+    print(f"{acct['name']}: exhausted mark cleared")
+    return 0
 
 
 def parse_reset(text, now=None):
-    """'resets 4:20am' or 'resets Mon 12:00am' -> epoch seconds, local time."""
+    """'resets 4:20am', 'resets Mon 12:00am' or 'resets Sep 16 at 1pm' -> epoch
+    seconds, local time."""
     now = now or dt.datetime.now()
     m = RESET_RE.search(text or "")
     if not m:
         return None
-    day, hour, minute, ampm = m.group(1), int(m.group(2)), int(m.group(3) or 0), m.group(4).lower()
+    day, month, mday = m.group(1), m.group(2), m.group(3)
+    hour, minute, ampm = int(m.group(4)), int(m.group(5) or 0), m.group(6).lower()
     hour = hour % 12 + (12 if ampm == "pm" else 0)
     when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if month:
+        when = when.replace(month=MONTHS.index(month.lower()[:3]) + 1, day=int(mday))
+        if when < now - dt.timedelta(days=1):
+            when = when.replace(year=when.year + 1)
+        return when.timestamp()
     if day:
         ahead = (WEEKDAYS.index(day.lower()[:3]) - now.weekday()) % 7
         when += dt.timedelta(days=ahead)
@@ -846,7 +883,7 @@ def main(argv):
     sp.add_argument("--dry-run", action="store_true")
     sp = sub.add_parser("check")
     sp.add_argument("--interactive", action="store_true")
-    for v in ("share", "keep-private"):
+    for v in ("share", "keep-private", "prefer", "clear"):
         sub.add_parser(v).add_argument("name")
     sp = sub.add_parser("run")
     sp.add_argument("pool")
@@ -880,6 +917,10 @@ def main(argv):
         rule(a.name, share=True)
     elif a.cmd == "keep-private":
         rule(a.name, share=False)
+    elif a.cmd == "prefer":
+        return prefer(a.name)
+    elif a.cmd == "clear":
+        return clear(a.name)
     elif a.cmd == "run":
         args = a.args[1:] if a.args[:1] == ["--"] else a.args
         return run(a.pool, args)

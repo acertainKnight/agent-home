@@ -40,17 +40,29 @@ assert ca.pools() == ["personal", "work"], ca.pools()
 assert [a["name"] for a in ca.accounts() if a["pool"] == "work"] == ["claude-work", "claude-work-2"]
 assert ca.by_name("work-2")["dir"] == d / ".claude-work-2"
 
-# pick: config order with no readings; headroom wins once readings exist
+# pick: config order, whatever the headroom readings say; exhausted skipped
 assert ca.pick("work")["name"] == "claude-work"
 ca._write_json(ca.STATE / "feed/claude-work.json", {"rate_limits": {"seven_day": {"used_percentage": 80}}, "at": time.time()})
 ca._write_json(ca.STATE / "feed/claude-work-2.json", {"rate_limits": {"seven_day": {"used_percentage": 20}}, "at": time.time()})
-assert ca.pick("work")["name"] == "claude-work-2"
-assert ca.pick("work", exclude=["claude-work-2"])["name"] == "claude-work"
-ca._write_json(ca.STATE / "exhausted/claude-work-2.json", {"until": time.time() + 3600})
 assert ca.pick("work")["name"] == "claude-work"
+assert ca.pick("work", exclude=["claude-work"])["name"] == "claude-work-2"
 ca._write_json(ca.STATE / "exhausted/claude-work.json", {"until": time.time() + 3600})
+assert ca.pick("work")["name"] == "claude-work-2"
+ca._write_json(ca.STATE / "exhausted/claude-work-2.json", {"until": time.time() + 3600})
 assert ca.pick("work") is None
 assert [c["pool"] for c in ca.candidates_for(ca.by_name("claude-work"))] == ["personal"]
+
+# clear drops the mark; prefer reorders the pool in config.json
+assert ca.clear("work-2") == 0
+assert ca.pick("work")["name"] == "claude-work-2"
+assert ca.clear("claude-work") == 0
+assert ca.pick("work")["name"] == "claude-work"
+assert ca.prefer("work-2") == 0
+assert [a["name"] for a in ca.accounts() if a["pool"] == "work"] == ["claude-work-2", "claude-work"]
+assert ca.pick("work")["name"] == "claude-work-2"
+assert ca.prefer("work") == 0
+assert [a["name"] for a in ca.accounts() if a["pool"] == "work"] == ["claude-work", "claude-work-2"]
+assert ca.prefer("nobody") == 1
 
 # reset parsing
 now = dt.datetime(2026, 9, 13, 20, 0)  # a Sunday
@@ -60,6 +72,10 @@ t = ca.parse_reset("You've hit your weekly limit · resets Mon 12:00am", now)
 assert dt.datetime.fromtimestamp(t) == dt.datetime(2026, 9, 14, 0, 0)
 t = ca.parse_reset("resets Sun 9pm", now)
 assert dt.datetime.fromtimestamp(t) == dt.datetime(2026, 9, 13, 21, 0)
+t = ca.parse_reset("You've hit your weekly limit · resets Sep 16 at 1pm (America/New_York)", now)
+assert dt.datetime.fromtimestamp(t) == dt.datetime(2026, 9, 16, 13, 0)
+t = ca.parse_reset("resets Jan 2 at 1pm", dt.datetime(2026, 12, 31, 10, 0))
+assert dt.datetime.fromtimestamp(t) == dt.datetime(2027, 1, 2, 13, 0)
 assert ca.parse_reset("no time here", now) is None
 
 # mirror: shared items linked into every non-default dir; real files untouched
