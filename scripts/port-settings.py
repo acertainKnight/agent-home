@@ -73,11 +73,19 @@ def _merge_env(secrets):
 
 
 def _sanitize(cfg):
-    """Return (sanitized copy, secrets dict)."""
+    """Return (sanitized copy, secrets dict). A key is placeholder'd if its
+    name looks like a secret, or if ~/.agent-home/env already defines it —
+    the env file is hand-tended and is the source of truth for that key, so a
+    captured literal would silently re-freeze a stale value on every future
+    capture() tick otherwise (_merge_env never overwrites an existing env
+    line, so this never clobbers a value the env file already holds)."""
     out = json.loads(json.dumps(cfg))
     secrets = {}
+    canon_env = _env_lines()
     for k, v in list(out.get("env", {}).items()):
-        if SECRET_KEY.search(k) and isinstance(v, str) and not PLACEHOLDER.match(v):
+        if not isinstance(v, str) or PLACEHOLDER.match(v):
+            continue
+        if SECRET_KEY.search(k) or k in canon_env:
             secrets[k] = v
             out["env"][k] = "${ENV:%s}" % k
     return out, secrets

@@ -87,6 +87,18 @@ def test_check_matches_and_detects_drift():
     assert ps.check() is False
 
 
+def test_env_defined_key_becomes_placeholder():
+    _scratch()
+    ps.ENV_FILE.write_text("CORTEX_MCP_URL=https://good/mcp\n")
+    json.dump(SAMPLE, open(ps.LIVE, "w"))
+    ps.capture()
+    cap = json.load(open(ps._capture_path("claude")))
+    assert cap["env"]["CORTEX_MCP_URL"] == "${ENV:CORTEX_MCP_URL}", (
+        "CORTEX_MCP_URL is already defined in the env file, so capture() "
+        "must placeholder it instead of freezing the live literal"
+    )
+
+
 def test_work_symlink_round_trip():
     d = _scratch()
     json.dump(SAMPLE, open(ps.LIVE, "w"))
@@ -109,5 +121,6 @@ if __name__ == "__main__":
     test_env_value_never_rewritten()
     test_apply_resolves_placeholder_and_refuses_clobber()
     test_check_matches_and_detects_drift()
+    test_env_defined_key_becomes_placeholder()
     test_work_symlink_round_trip()
     print("port-settings self-check: PASS")
