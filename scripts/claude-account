@@ -287,7 +287,45 @@ def mirror(dry_run=False, only=None):
                 dst.symlink_to(src)
     for dst, src in changed:
         print(f"{'would link' if dry_run else 'link'} {dst} -> {src}")
+    changed += mirror_mcp_servers(dry_run)
     return changed
+
+
+def _claude_json(acct):
+    """The user-scope config file Claude Code reads for this account: ``~/.claude.json``
+    when CLAUDE_CONFIG_DIR is unset (the default account), ``<config_dir>/.claude.json``
+    otherwise."""
+    return HOME / ".claude.json" if acct["default"] else acct["dir"] / ".claude.json"
+
+
+def mirror_mcp_servers(dry_run=False):
+    """Give every account the same user-scope MCP server definitions: the union of the
+    top-level ``mcpServers`` of every account's config file. An account keeps its own
+    definition for a name it already has; only missing names are added, so the same
+    tool names exist on every account. The OAuth grant for a server is per account and
+    is not copied: a server added here shows as needing login until that account signs
+    in to it once."""
+    files = {a["name"]: _claude_json(a) for a in accounts()}
+    union = {}
+    for f in files.values():
+        for k, v in ((_read_json(f) or {}).get("mcpServers") or {}).items():
+            union.setdefault(k, v)
+    added = []
+    for name, f in files.items():
+        cfg = _read_json(f) or {}
+        have = cfg.get("mcpServers") or {}
+        missing = {k: v for k, v in union.items() if k not in have}
+        if not missing:
+            continue
+        added.append((name, sorted(missing)))
+        if not dry_run:
+            cfg["mcpServers"] = {**have, **missing}
+            tmp = f.with_name(f.name + ".tmp")
+            tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+            tmp.replace(f)
+    for name, names in added:
+        print(f"{'would add' if dry_run else 'add'} mcp servers to {name}: {', '.join(names)}")
+    return added
 
 
 def rule(name, share):
@@ -510,6 +548,7 @@ def run(pool, args):
         pool = cur["pool"] if cur else pools()[0]
     attended = sys.stdin.isatty() and not _tmux_unattended() and "rc" not in args
     check(interactive=attended)
+    mirror_mcp_servers()
     acct = pick(pool)
     if not acct:
         members = [a for a in accounts() if a["pool"] == pool]
