@@ -5,8 +5,8 @@ into every account directory.
 
 Accounts are the anthropic-sub entries of $AGENT_HOME/config.json. Each has a
 config_dir, a pool (defaults to the name suffix without a trailing number:
-claude-work-2 -> work) and optional spill_to (pools offered when its own pool
-is exhausted). The default directory (~/.claude) must be launched with
+claude-work-2 -> work) and optional spill_to (pools drained, in order, once
+its own pool is exhausted). The default directory (~/.claude) must be launched with
 CLAUDE_CONFIG_DIR unset: set explicitly to that path, Claude Code reads a stub
 account file inside it and reports signed out.
 
@@ -22,8 +22,12 @@ account file inside it and reports signed out.
   mirror [--dry-run]            link every recipe item into each account dir
   check [--interactive]         names in ~/.claude the recipe has not ruled on
   share <name> | keep-private <name>
-  run <pool> -- [claude args]   launch Claude on the pool's best account and
-                                relaunch on the next one after a limit handoff
+  run <pool> -- [claude args]   launch Claude on the pool's first account with
+                                headroom; after a limit, relaunch the same
+                                conversation on the next account (own pool,
+                                then spill pools; sleeps until the earliest
+                                reset when every account is out) with a
+                                starting message that says what happened
   limit-hit                     StopFailure hook (stdin JSON)
   feed -- <status-line cmd>     record rate_limits from the status-line JSON,
                                 then run the original status-line command
@@ -38,7 +42,6 @@ import os
 import re
 import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
@@ -287,7 +290,45 @@ def mirror(dry_run=False, only=None):
                 dst.symlink_to(src)
     for dst, src in changed:
         print(f"{'would link' if dry_run else 'link'} {dst} -> {src}")
+    changed += mirror_mcp_servers(dry_run)
     return changed
+
+
+def _claude_json(acct):
+    """The user-scope config file Claude Code reads for this account: ``~/.claude.json``
+    when CLAUDE_CONFIG_DIR is unset (the default account), ``<config_dir>/.claude.json``
+    otherwise."""
+    return HOME / ".claude.json" if acct["default"] else acct["dir"] / ".claude.json"
+
+
+def mirror_mcp_servers(dry_run=False):
+    """Give every account the same user-scope MCP server definitions: the union of the
+    top-level ``mcpServers`` of every account's config file. An account keeps its own
+    definition for a name it already has; only missing names are added, so the same
+    tool names exist on every account. The OAuth grant for a server is per account and
+    is not copied: a server added here shows as needing login until that account signs
+    in to it once."""
+    files = {a["name"]: _claude_json(a) for a in accounts()}
+    union = {}
+    for f in files.values():
+        for k, v in ((_read_json(f) or {}).get("mcpServers") or {}).items():
+            union.setdefault(k, v)
+    added = []
+    for name, f in files.items():
+        cfg = _read_json(f) or {}
+        have = cfg.get("mcpServers") or {}
+        missing = {k: v for k, v in union.items() if k not in have}
+        if not missing:
+            continue
+        added.append((name, sorted(missing)))
+        if not dry_run:
+            cfg["mcpServers"] = {**have, **missing}
+            tmp = f.with_name(f.name + ".tmp")
+            tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+            tmp.replace(f)
+    for name, names in added:
+        print(f"{'would add' if dry_run else 'add'} mcp servers to {name}: {', '.join(names)}")
+    return added
 
 
 def rule(name, share):
@@ -384,7 +425,7 @@ def notify(text):
 # ---------------------------------------------------------------- limit -----
 
 def candidates_for(acct):
-    """Best account per spill pool, for the exhausted-pool picker."""
+    """First account with headroom per spill pool, in the pool's spill order."""
     pools_ = []
     for a in accounts():
         if a["pool"] == acct["pool"]:
@@ -397,6 +438,23 @@ def candidates_for(acct):
         if best:
             out.append({"name": best["name"], "pool": p, "headroom": headroom(best["name"])})
     return out
+
+
+def next_account(pool, exclude=()):
+    """The pool's first account with headroom, else the first account of the
+    pool's first spill pool that has one; None when every option is out."""
+    nxt = pick(pool, exclude=exclude)
+    if nxt:
+        return nxt
+    members = [a for a in accounts() if a["pool"] == pool]
+    cands = candidates_for(members[0]) if members else []
+    return by_name(cands[0]["name"]) if cands else None
+
+
+def earliest_reset():
+    marks = [exhausted_until(a["name"]) for a in accounts()]
+    marks = [m for m in marks if m]
+    return min(marks) if marks else None
 
 
 def limit_hit():
@@ -413,21 +471,17 @@ def limit_hit():
         return 0
     until = parse_reset(text) or time.time() + (7 * 86400 if "weekly" in text.lower() else 5 * 3600)
     _write_json(STATE / "exhausted" / f"{acct['name']}.json", {"until": until, "text": text, "at": time.time()})
-    nxt = pick(acct["pool"], exclude=[acct["name"]])
+    nxt = next_account(acct["pool"], exclude=[acct["name"]])
     tty = session_tty()
-    session_id = payload.get("session_id")
-    declined = STATE / "declined" / f"{session_id}.json"
-    cands = [] if nxt else candidates_for(acct)
-    if not nxt and (not cands or declined.exists()):
-        return 0  # nothing to switch to: Claude Code's own wait takes over
     note = {
-        "session_id": session_id, "cwd": payload.get("cwd"), "from": acct["name"], "pool": acct["pool"],
-        "next": nxt["name"] if nxt else None, "candidates": cands, "until": until, "text": text,
+        "session_id": payload.get("session_id"), "cwd": payload.get("cwd"), "from": acct["name"],
+        "pool": acct["pool"], "next": nxt["name"] if nxt else None, "until": until, "text": text,
         "created": time.time(),
     }
     _write_json(handoff_path(tty), note)
-    notify(f"{acct['name']}: {text.split('·')[0].strip()}. "
-           + (f"Continuing on {nxt['name']}." if nxt else f"{acct['pool']} pool is out; pick another pool in the terminal."))
+    announce(f"{acct['name']} hit its limit ({text.split('·')[0].strip()}). "
+             + (f"Continuing on {nxt['name']}; open that account on the phone to see the session."
+                if nxt else f"Every account is out; resuming at {_fmt_until(earliest_reset() or until)}."))
     root = claude_root_on_tty(tty) if tty else None
     if root:
         os.kill(root, signal.SIGTERM)
@@ -454,37 +508,45 @@ def _fmt_until(until):
     return dt.datetime.fromtimestamp(until).strftime("%a %-I:%M%p").lower()
 
 
-def choose_spill(note):
-    """Returns an account, 'wait', or 'quit'."""
-    cands = note["candidates"]
-    lines = [f"{note['pool']} pool is out until {_fmt_until(note['until'])}. Continue this conversation on:"]
-    for i, c in enumerate(cands, 1):
-        h = f"weekly {100 - c['headroom']:.0f}% used" if c["headroom"] is not None else "no reading yet"
-        lines.append(f"  {i}) {c['name']}   ({h})")
-    lines.append(f"  {len(cands) + 1}) wait here for the reset")
-    lines.append(f"  {len(cands) + 2}) quit")
-    prompt = "\n".join(lines)
-    if sys.stdin.isatty() and not _tmux_unattended():
-        print(prompt)
+def wait_for_reset(pool):
+    """Sleep until the earliest reset of any account, then return the first
+    account with headroom for the pool or its spill pools. None on Ctrl-C."""
+    while True:
+        acct = next_account(pool)
+        if acct:
+            return acct
+        until = max(earliest_reset() or 0, time.time() + 60)
+        announce(f"every account is out; resuming at {_fmt_until(until)}")
         try:
-            ans = input("  > ").strip()
-        except EOFError:
-            ans = ""
-    else:
-        ans = imessage_ask(prompt, [c["name"] for c in cands] + ["wait", "quit"])
-    if ans.isdigit() and 1 <= int(ans) <= len(cands):
-        return by_name(cands[int(ans) - 1]["name"])
-    for c in cands:
-        if ans == c["name"] or ans == c["name"].replace("claude-", ""):
-            return by_name(c["name"])
-    if ans == str(len(cands) + 2) or ans == "quit":
-        return "quit"
-    return "wait"
+            time.sleep(until - time.time() + 5)
+        except KeyboardInterrupt:
+            return None
 
 
-def _resume_args(original, session_id):
+def resume_message(note, acct):
+    """The first message of the relaunched conversation: what happened, what
+    died with the previous process, and how to pick the work back up."""
+    moved = dt.datetime.fromtimestamp(note["created"]).strftime("%-I:%M%p").lower()
+    return (
+        f"[claude-account] This conversation moved from {note['from']} to {acct['name']} at {moved} "
+        f"because {note['from']} hit its usage limit (\"{note['text']}\"). "
+        f"{note['from']} is usable again after {_fmt_until(note['until'])}.\n"
+        "The previous process was ended, so anything it was running is gone:\n"
+        "- background Workflow runs: their journals are on disk; resume each with "
+        "Workflow resumeFromRunId instead of starting it again\n"
+        "- subagents and background shell commands: check the board, the run folder and git "
+        "for outputs they already wrote before relaunching any of them\n"
+        "- scheduled wakeups and monitors: re-create them\n"
+        "Read your last few messages, then continue the task you were in the middle of. "
+        "Do not ask whether to continue."
+    )
+
+
+def _resume_args(original, session_id, message=None):
     """The relaunch keeps the original flags (with their values) and drops the
-    positional prompt, the `rc` subcommand and any earlier resume flags."""
+    positional prompt, the `rc` subcommand and any earlier resume flags. The
+    message goes first: `--remote-control` takes an optional name, so a
+    trailing positional would be read as that name."""
     keep, i = [], 0
     while i < len(original):
         a = original[i]
@@ -501,7 +563,7 @@ def _resume_args(original, session_id):
                 i += 1
         i += 1
     rc = any(a in ("rc", "remote-control", "--remote-control") for a in original)
-    return ["--resume", session_id] + (["--remote-control"] if rc else []) + keep
+    return ([message] if message else []) + ["--resume", session_id] + (["--remote-control"] if rc else []) + keep
 
 
 def run(pool, args):
@@ -510,40 +572,27 @@ def run(pool, args):
         pool = cur["pool"] if cur else pools()[0]
     attended = sys.stdin.isatty() and not _tmux_unattended() and "rc" not in args
     check(interactive=attended)
-    acct = pick(pool)
+    mirror_mcp_servers()
+    if not any(a["pool"] == pool for a in accounts()):
+        print(f"no accounts in pool {pool}", file=sys.stderr)
+        return 1
+    acct = next_account(pool) or wait_for_reset(pool)
     if not acct:
-        members = [a for a in accounts() if a["pool"] == pool]
-        if not members:
-            print(f"no accounts in pool {pool}", file=sys.stderr)
-            return 1
-        note = {"pool": pool, "from": members[0]["name"],
-                "until": max([exhausted_until(a["name"]) or 0 for a in members] + [time.time()]),
-                "candidates": candidates_for(members[0])}
-        choice = choose_spill(note) if note["candidates"] else "wait"
-        if choice == "quit":
-            return 1
-        acct = members[0] if choice == "wait" else choice
+        return 1
     tty = my_tty()
+    launch = list(args)
     while True:
         env = env_for(acct)
         print(f"[claude-account] {acct['name']} ({acct['pool']})", file=sys.stderr)
-        code = subprocess.call([CLAUDE_BIN] + args, env=env)
+        code = subprocess.call([CLAUDE_BIN] + launch, env=env)
         note = _read_json(handoff_path(tty))
         if not note or note.get("created", 0) < time.time() - 600:
             return code
         handoff_path(tty).unlink(missing_ok=True)
-        if note.get("next"):
-            acct = by_name(note["next"])
-        else:
-            choice = choose_spill(note)
-            if choice == "quit":
-                return code
-            if choice == "wait":
-                _write_json(STATE / "declined" / f"{note['session_id']}.json", {"at": time.time()})
-                acct = by_name(note["from"])
-            else:
-                acct = choice
-        args = _resume_args(args, note["session_id"])
+        acct = by_name(note["next"]) if note.get("next") else wait_for_reset(pool)
+        if not acct:
+            return code
+        launch = _resume_args(args, note["session_id"], resume_message(note, acct))
 
 
 # ------------------------------------------------------------- imessage -----
@@ -559,60 +608,21 @@ def _chat_guid():
     return None
 
 
-def _decode_body(blob):
-    if not blob:
-        return ""
-    i = blob.find(b"NSString")
-    if i < 0:
-        return ""
-    j = blob.find(b"+", i)
-    if j < 0:
-        return ""
-    k = j + 1
-    length = blob[k]
-    k += 1
-    if length == 0x81:
-        length = int.from_bytes(blob[k:k + 2], "little")
-        k += 2
-    return blob[k:k + length].decode("utf-8", "replace")
-
-
-def imessage_ask(question, answers, timeout=1800):
-    """Send the question to the self chat and wait for a reply that names one
-    of the answers (or its number). Returns '' on timeout."""
+def imessage_send(text):
+    """One line to the self chat named in instance.yaml; no reply expected."""
     guid = _chat_guid()
     if not guid:
-        return ""
-    handle = guid.split(";")[-1]
-    numbered = question + "\nReply with a number or a name."
+        return False
     subprocess.run(["osascript", "-e", "on run argv", "-e",
                     'tell application "Messages" to send (item 1 of argv) to chat id (item 2 of argv)',
-                    "-e", "end run", numbered, guid], capture_output=True, timeout=20, check=False)
-    sent_at = time.time()
-    db = HOME / "Library/Messages/chat.db"
-    deadline = sent_at + timeout
-    while time.time() < deadline:
-        time.sleep(15)
-        try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            rows = con.execute(
-                "select m.text, m.attributedBody, m.date from message m "
-                "join chat_message_join j on j.message_id=m.ROWID join chat c on c.ROWID=j.chat_id "
-                "where c.chat_identifier=? and m.is_from_me=1 order by m.date desc limit 5", (handle,)).fetchall()
-            con.close()
-        except sqlite3.Error:
-            return ""
-        for text, body, date in rows:
-            when = date / 1e9 + 978307200
-            if when <= sent_at + 2:
-                continue
-            reply = (text or _decode_body(body) or "").strip().lower()
-            if reply == numbered.strip().lower():
-                continue
-            for i, a in enumerate(answers, 1):
-                if reply in (str(i), a.lower(), a.lower().replace("claude-", "")):
-                    return str(i) if reply == str(i) else a
-    return ""
+                    "-e", "end run", text, guid], capture_output=True, timeout=20, check=False)
+    return True
+
+
+def announce(text):
+    print(f"[claude-account] {text}", file=sys.stderr)
+    notify(text)
+    imessage_send(text)
 
 
 # ---------------------------------------------------------------- feed ------

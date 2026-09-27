@@ -52,6 +52,19 @@ ca._write_json(ca.STATE / "exhausted/claude-work-2.json", {"until": time.time() 
 assert ca.pick("work") is None
 assert [c["pool"] for c in ca.candidates_for(ca.by_name("claude-work"))] == ["personal"]
 
+# next_account: own pool first, then the spill pool, then nothing; earliest reset across all
+assert ca.next_account("work")["name"] == "claude-personal"
+ca._write_json(ca.STATE / "exhausted/claude-personal.json", {"until": time.time() + 7200})
+assert ca.next_account("work") is None
+assert ca.next_account("personal") is None
+assert abs(ca.earliest_reset() - (time.time() + 3600)) < 5
+note = {"session_id": "sid", "from": "claude-work", "pool": "work", "next": "claude-personal",
+        "until": time.time() + 3600, "text": "You've hit your session limit · resets 7pm", "created": time.time()}
+msg = ca.resume_message(note, ca.by_name("claude-personal"))
+assert msg.startswith("[claude-account] This conversation moved from claude-work to claude-personal")
+assert "resumeFromRunId" in msg and "Do not ask whether to continue." in msg
+(ca.STATE / "exhausted/claude-personal.json").unlink()
+
 # clear drops the mark; prefer reorders the pool in config.json
 assert ca.clear("work-2") == 0
 assert ca.pick("work")["name"] == "claude-work-2"
@@ -98,6 +111,10 @@ assert ca._resume_args(["rc"], "sid") == ["--resume", "sid", "--remote-control"]
 assert ca._resume_args(["--permission-mode", "acceptEdits", "do the thing", "-c"], "sid") == \
     ["--resume", "sid", "--permission-mode", "acceptEdits"]
 assert ca._resume_args(["--resume", "old", "--model", "opus"], "sid") == ["--resume", "sid", "--model", "opus"]
+# the starting message goes first, ahead of --remote-control's optional name slot
+assert ca._resume_args(["rc"], "sid", "moved") == ["moved", "--resume", "sid", "--remote-control"]
+assert ca._resume_args(["--dangerously-skip-permissions"], "sid", "moved") == \
+    ["moved", "--resume", "sid", "--dangerously-skip-permissions"]
 
 # env: the default account launches with the variable unset, never set to its path
 assert "CLAUDE_CONFIG_DIR" not in ca.env_for(ca.by_name("claude-personal"), {"CLAUDE_CONFIG_DIR": "x"})
@@ -120,3 +137,66 @@ assert entry["spill_to"] == ["personal"]  # inherited from the pool's siblings
 assert (d / ".claude-work-3/projects").resolve() == (d / ".claude/projects").resolve()
 assert ca.login("claude-work-3", None) == 0  # re-sign an existing account
 print("login self-check ok")
+
+# limit-hit: the hook marks the account, writes the handoff note with the spill account
+# when its own pool is out, and announces; the kill step is skipped for an unknown tty
+import io
+import subprocess
+import sys
+os.environ["CLAUDE_ACCOUNT_TTY"] = "ttysTEST"
+ca.notify = lambda text: None
+for n in ("claude-personal", "claude-work", "claude-work-2", "claude-work-3"):
+    (ca.STATE / f"exhausted/{n}.json").unlink(missing_ok=True)
+ca._write_json(ca.STATE / "exhausted/claude-work-2.json", {"until": time.time() + 3600})
+ca._write_json(ca.STATE / "exhausted/claude-work-3.json", {"until": time.time() + 3600})
+payload = {"session_id": "s1", "cwd": "/tmp", "last_assistant_message": "You've hit your session limit · resets 11:59pm"}
+os.environ["CLAUDE_CONFIG_DIR"] = str(d / ".claude-work")
+sys.stdin = io.StringIO(json.dumps(payload))
+assert ca.limit_hit() == 0
+sys.stdin = sys.__stdin__
+assert ca.exhausted_until("claude-work")
+note = ca._read_json(ca.handoff_path("ttysTEST"))
+assert note["from"] == "claude-work" and note["next"] == "claude-personal", note
+assert "moved from claude-work to claude-personal" in ca.resume_message(note, ca.by_name("claude-personal"))
+ca.handoff_path("ttysTEST").unlink()
+del os.environ["CLAUDE_CONFIG_DIR"]
+print("limit-hit self-check ok")
+
+# run loop: the stub Claude hits the limit on its first launch; the loop relaunches the same
+# session on the spill account with the starting message first, then exits when no note follows
+for n in ("claude-personal", "claude-work"):
+    (ca.STATE / f"exhausted/{n}.json").unlink(missing_ok=True)
+log = d / "launches.log"
+(d / "payload.json").write_text(json.dumps(payload))
+stub.write_text(
+    "#!/bin/bash\n"
+    f'echo "${{CLAUDE_CONFIG_DIR:-unset}}|$*" >> "{log}"\n'
+    f'if [ "$(wc -l < "{log}" | tr -d " ")" = 1 ]; then\n'
+    f"  \"{REPO / 'scripts' / 'claude-account'}\" limit-hit < \"{d / 'payload.json'}\"\n"
+    "fi\nexit 0\n")
+ca.my_tty = lambda: "ttysTEST"
+sys.stdin = io.StringIO("")
+assert ca.run("work", ["--permission-mode", "acceptEdits"]) == 0
+sys.stdin = sys.__stdin__
+def launches():
+    return [l for l in log.read_text().splitlines() if l.startswith(("unset|", f"{d / '.claude-work'}|"))]
+assert launches()[0] == f"{d / '.claude-work'}|--permission-mode acceptEdits", launches()
+assert launches()[1].startswith("unset|[claude-account] This conversation moved from claude-work to claude-personal"), launches()
+assert log.read_text().rstrip().endswith("--resume s1 --permission-mode acceptEdits"), log.read_text()
+assert len(launches()) == 2, launches()
+
+# every account out: the loop sleeps until the earliest reset, then relaunches
+log.unlink()
+(ca.STATE / "exhausted/claude-work.json").unlink()
+_sleep = time.sleep
+time.sleep = lambda s: _sleep(min(s, 4))  # the loop's 60 s floor would only slow the check
+ca._write_json(ca.STATE / "exhausted/claude-personal.json", {"until": time.time() + 3})
+ca._write_json(ca.STATE / "exhausted/claude-work-2.json", {"until": time.time() + 3600})
+ca._write_json(ca.STATE / "exhausted/claude-work-3.json", {"until": time.time() + 3600})
+t0 = time.time()
+sys.stdin = io.StringIO("")
+assert ca.run("work", []) == 0
+sys.stdin = sys.__stdin__
+assert launches()[0].startswith(str(d / ".claude-work") + "|") and launches()[1].startswith("unset|[claude-account]"), launches()
+assert time.time() - t0 >= 3, "should have waited for the personal reset"
+print("run-loop self-check ok")
