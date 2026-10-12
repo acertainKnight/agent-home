@@ -27,7 +27,9 @@ account file inside it and reports signed out.
                                 conversation on the next account (own pool,
                                 then spill pools; sleeps until the earliest
                                 reset when every account is out) with a
-                                starting message that says what happened
+                                starting message that says what happened;
+                                `auth ...` runs Claude directly on the caller's
+                                CLAUDE_CONFIG_DIR (unset = ~/.claude)
   limit-hit                     StopFailure hook (stdin JSON)
   feed -- <status-line cmd>     record rate_limits from the status-line JSON,
                                 then run the original status-line command
@@ -464,7 +466,10 @@ def limit_hit():
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a") as fh:
         fh.write(json.dumps({"at": time.time(), "env_dir": os.environ.get("CLAUDE_CONFIG_DIR"), **payload}) + "\n")
-    if not LIMIT_RE.search(text):
+    # A resumed session restores subagents that died on the previous account, and
+    # they re-report that account's limit under the new one. Only the main
+    # conversation's failure says anything about the account it runs on.
+    if payload.get("agent_id") or not LIMIT_RE.search(text):
         return 0
     acct = account_of_env()
     if not acct:
@@ -567,6 +572,9 @@ def _resume_args(original, session_id, message=None):
 
 
 def run(pool, args):
+    # Sign-in acts on the directory the caller named, never on the pool's pick.
+    if args[:1] == ["auth"]:
+        os.execvp(CLAUDE_BIN, [CLAUDE_BIN] + args)
     if pool == "auto":
         cur = account_of_env()
         pool = cur["pool"] if cur else pools()[0]
