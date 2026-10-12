@@ -151,6 +151,10 @@ ca._write_json(ca.STATE / "exhausted/claude-work-2.json", {"until": time.time() 
 ca._write_json(ca.STATE / "exhausted/claude-work-3.json", {"until": time.time() + 3600})
 payload = {"session_id": "s1", "cwd": "/tmp", "last_assistant_message": "You've hit your session limit · resets 11:59pm"}
 os.environ["CLAUDE_CONFIG_DIR"] = str(d / ".claude-work")
+sys.stdin = io.StringIO(json.dumps({**payload, "agent_id": "a1"}))
+assert ca.limit_hit() == 0
+assert not ca.exhausted_until("claude-work")  # a subagent's failure marks nothing
+assert not ca.handoff_path("ttysTEST").exists()
 sys.stdin = io.StringIO(json.dumps(payload))
 assert ca.limit_hit() == 0
 sys.stdin = sys.__stdin__
@@ -200,3 +204,15 @@ sys.stdin = sys.__stdin__
 assert launches()[0].startswith(str(d / ".claude-work") + "|") and launches()[1].startswith("unset|[claude-account]"), launches()
 assert time.time() - t0 >= 3, "should have waited for the personal reset"
 print("run-loop self-check ok")
+
+# auth: runs directly on the caller's directory even when the pool would pick another
+auth_stub = d / "claude-auth-stub"
+auth_stub.write_text('#!/bin/bash\necho "${CLAUDE_CONFIG_DIR:-unset}|$*"\n')
+auth_stub.chmod(0o755)
+for n in ("claude-personal", "claude-work"):
+    (ca.STATE / f"exhausted/{n}.json").unlink(missing_ok=True)
+r = subprocess.run([str(REPO / "scripts" / "claude-account"), "run", "auto", "--", "auth", "login"],
+                   env={**os.environ, "CLAUDE_ACCOUNT_BIN": str(auth_stub), "CLAUDE_CONFIG_DIR": str(d / ".claude-work-2")},
+                   capture_output=True, text=True, check=True)
+assert r.stdout.strip() == f"{d / '.claude-work-2'}|auth login", r.stdout
+print("auth pass-through self-check ok")
