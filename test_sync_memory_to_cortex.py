@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Self-check for scripts/sync-memory-to-cortex.py. Runs the script against a
 local fake cortex and proves: files are deposited under a path-derived id,
-MEMORY.md and credential-shaped files are never sent, an unchanged file is not
+MEMORY.md, symlinks, auto-extracted memories and credential-shaped files
+are never sent, an unchanged file is not
 re-sent, an edit re-sends under the same id, and a deleted file is retired.
 Run: python3 test_sync_memory_to_cortex.py
 """
@@ -52,6 +53,13 @@ def main():
         (mem / "MEMORY.md").write_text("- [a](a.md)\n")
         (mem / "a.md").write_text("---\nname: a\nmetadata:\n  type: project\n---\nfirst\n")
         (mem / "leak.md").write_text("OPENAI_API_KEY=abcdefghijklmnop1234\n")
+        (mem / "leak-yaml.md").write_text("api_key: 'abcdefghijklmnop1234'\n")
+        (mem / "leak-url.md").write_text("db at postgres://nick:hunter22pw@db.local/x\n")
+        (mem / "leak-jwt.md").write_text("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc\n")
+        (mem / "codex.md").write_text("---\nname: c\nmetadata:\n  source: codex-native-memory\n---\nx\n")
+        outside = tmp / "outside.md"
+        outside.write_text("not memory\n")
+        (mem / "link.md").symlink_to(outside)
         env = dict(
             os.environ,
             MEMORY_DIR=str(mem),

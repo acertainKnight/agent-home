@@ -4,8 +4,9 @@
 Each memory file becomes one cortex note whose id is derived from the file's
 path (url:agent-memory/<relative path>), so an edit replaces the earlier text
 in place and a deleted file retires its note. MEMORY.md, the index, is not
-mirrored. A file whose text looks like it holds a credential is never sent,
-and its cortex copy, if any, is retired.
+mirrored, nor is a symlink or a file written by an automatic extractor
+(UNTRUSTED_SOURCES). A file whose text looks like it holds a credential is
+never sent. A withheld file's cortex copy, if any, is retired.
 
 Notes land in the claude-memory folder with no origin URL. Cortex treats that
 combination as an agent's own writing (trusted by the per-message lookup,
@@ -43,9 +44,16 @@ SECRET = re.compile(
     r"|\bAKIA[0-9A-Z]{16}\b"
     r"|\bxox[abprs]-[A-Za-z0-9-]{10,}"
     r"|\bAIza[0-9A-Za-z_-]{35}"
-    r"|^\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)\s*=\s*\S{12,}",
-    re.M,
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\."
+    r"|\bbearer\s+[A-Za-z0-9._~+/-]{20,}"
+    r"|\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]{6,}@"
+    r"|[A-Za-z0-9_]*(?:key|token|secret|password|passwd|credential)[A-Za-z0-9_]*"
+    r"[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{16,}",
+    re.I,
 )
+# Written by a model reading its own sessions, which may quote outside content;
+# cortex would label these trusted agent notes, so they stay out.
+UNTRUSTED_SOURCES = {"codex-native-memory"}
 
 
 def canonical_id(rel):
@@ -59,6 +67,13 @@ def frontmatter(text):
     name = re.search(r"^name:\s*(.+)$", block, re.M)
     kind = re.search(r"^\s+type:\s*(\S+)", block, re.M)
     return (name.group(1).strip() if name else ""), (kind.group(1) if kind else "")
+
+
+def source(text):
+    """The metadata.source of a memory file's YAML header, '' when absent."""
+    head = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    found = re.search(r"^\s+source:\s*(\S+)", head.group(1), re.M) if head else None
+    return found.group(1) if found else ""
 
 
 def call(method, path, body=None):
@@ -109,11 +124,16 @@ def main():
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     sent = retired = skipped = failed = 0
     files = {}
+    root = MEMORY_DIR.resolve()
     for path in sorted(MEMORY_DIR.rglob("*.md")):
         rel = path.relative_to(MEMORY_DIR).as_posix()
-        if rel == "MEMORY.md":
+        if rel == "MEMORY.md" or path.is_symlink() or not path.resolve().is_relative_to(root):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        if source(text) in UNTRUSTED_SOURCES:
+            skipped += 1
+            print(f"memory->cortex: withheld {rel} (source {source(text)})")
+            continue
         if SECRET.search(text):
             skipped += 1
             print(f"memory->cortex: withheld {rel} (credential-shaped text)")
