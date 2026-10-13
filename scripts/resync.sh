@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Full drift-elimination pass: links, MCP, opencode agents, cursor hooks,
-# history index, codex distill. Run by the launchd watcher (on change +
+# history index, codex distill, memory -> cortex. Run by the launchd watcher (on change +
 # hourly) and `make resync`.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -18,4 +18,5 @@ python3 scripts/history.py latest
 python3 scripts/history.py handoffs
 python3 scripts/distill-codex.py
 python3 scripts/distill-codex-memory.py
+python3 scripts/sync-memory-to-cortex.py
 echo "resync complete $(date '+%F %T')"
