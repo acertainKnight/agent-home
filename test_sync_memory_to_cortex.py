@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Self-check for scripts/sync-memory-to-cortex.py. Runs the script against a
 local fake cortex and proves: files are deposited under a path-derived id,
-MEMORY.md, symlinks, auto-extracted memories and credential-shaped files
-are never sent, an unchanged file is not
-re-sent, an edit re-sends under the same id, and a deleted file is retired.
+MEMORY.md, symlinks and credential-shaped files are never sent, a file keeps
+its metadata.source as a tag, an unchanged file is not re-sent, an edit
+re-sends under the same id, and a deleted file is retired.
 Run: python3 test_sync_memory_to_cortex.py
 """
 import json
@@ -69,8 +69,10 @@ def main():
         )
 
         run(env)
-        assert [(m, p) for m, p, _ in CALLS] == [("POST", "/v1/deposit")], CALLS
-        body = CALLS[0][2]
+        sent = {b["ids"]["url"]: b for m, p, b in CALLS if (m, p) == ("POST", "/v1/deposit")}
+        assert sorted(sent) == ["agent-memory/a.md", "agent-memory/codex.md"], CALLS
+        assert "memory-source:codex-native-memory" in sent["agent-memory/codex.md"]["tags"]
+        body = sent["agent-memory/a.md"]
         assert body["ids"] == {"url": "agent-memory/a.md"}
         assert body["title"] == "a" and body["folder"] == "claude-memory"
         assert "memory-type:project" in body["tags"]

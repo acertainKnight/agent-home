@@ -4,14 +4,15 @@
 Each memory file becomes one cortex note whose id is derived from the file's
 path (url:agent-memory/<relative path>), so an edit replaces the earlier text
 in place and a deleted file retires its note. MEMORY.md, the index, is not
-mirrored, nor is a symlink or a file written by an automatic extractor
-(UNTRUSTED_SOURCES). A file whose text looks like it holds a credential is
+mirrored, nor is a symlink. A file whose text looks like it holds a credential is
 never sent. A withheld file's cortex copy, if any, is retired.
 
 Notes land in the claude-memory folder with no origin URL. Cortex treats that
 combination as an agent's own writing (trusted by the per-message lookup,
 labelled "agent note", never an owner fact) and keeps it out of automatic fact
-extraction.
+extraction. Every file is mirrored whichever harness wrote it; its
+metadata.source, when present, is kept as a memory-source tag. The lookup still
+asks of every note whether it reads as instructions aimed at an AI.
 
 State lives in .cortex-memory-sync.json beside the memory folder: a map from
 relative path to the sha256 of the text last accepted by cortex. Run by
@@ -51,9 +52,7 @@ SECRET = re.compile(
     r"[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{16,}",
     re.I,
 )
-# Written by a model reading its own sessions, which may quote outside content;
-# cortex would label these trusted agent notes, so they stay out.
-UNTRUSTED_SOURCES = {"codex-native-memory"}
+
 
 
 def canonical_id(rel):
@@ -94,6 +93,7 @@ def call(method, path, body=None):
 
 def deposit(rel, text):
     name, kind = frontmatter(text)
+    origin = source(text)
     call(
         "POST",
         "/v1/deposit",
@@ -103,7 +103,9 @@ def deposit(rel, text):
             "title": name or Path(rel).stem,
             "ids": {"url": ID_PREFIX + rel},
             "folder": FOLDER,
-            "tags": ["agent-memory"] + ([f"memory-type:{kind}"] if kind else []),
+            "tags": ["agent-memory"]
+            + ([f"memory-type:{kind}"] if kind else [])
+            + ([f"memory-source:{origin}"] if origin else []),
         },
     )
 
@@ -130,10 +132,6 @@ def main():
         if rel == "MEMORY.md" or path.is_symlink() or not path.resolve().is_relative_to(root):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        if source(text) in UNTRUSTED_SOURCES:
-            skipped += 1
-            print(f"memory->cortex: withheld {rel} (source {source(text)})")
-            continue
         if SECRET.search(text):
             skipped += 1
             print(f"memory->cortex: withheld {rel} (credential-shaped text)")
