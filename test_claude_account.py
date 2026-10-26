@@ -5,8 +5,10 @@ Run: python3 test_claude_account.py"""
 import datetime as dt
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -121,6 +123,54 @@ assert "CLAUDE_CONFIG_DIR" not in ca.env_for(ca.by_name("claude-personal"), {"CL
 assert ca.env_for(ca.by_name("claude-work"), {})["CLAUDE_CONFIG_DIR"] == str(d / ".claude-work")
 assert ca.account_of_env({})["name"] == "claude-personal"
 assert ca.account_of_env({"CLAUDE_CONFIG_DIR": str(d / ".claude-work-2")})["name"] == "claude-work-2"
+
+# limit messages: "hit" and "reached" both count; the server's own throttling does not
+assert ca.LIMIT_RE.search("You've reached your Fable limit. Run /usage-credits to continue")
+assert not ca.LIMIT_RE.search("API Error: Server is temporarily limiting requests (not your usage limit)")
+
+# live usage check: the latest reset among limits at 100%, None when all have room
+import contextlib
+import urllib.request
+_script, _urlopen = ca.SCRIPT, urllib.request.urlopen
+(d / "bin").mkdir()
+(d / "bin/claude-token.sh").write_text("#!/bin/sh\nprintf tok\n")
+(d / "bin/claude-token.sh").chmod(0o755)
+ca.SCRIPT = d / "bin/claude-account"
+soon, later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=h) for h in (2, 30))
+usage = {"limits": [
+    {"kind": "weekly_all", "percent": 40, "resets_at": later.isoformat()},
+    {"kind": "weekly_scoped", "percent": 100, "resets_at": later.isoformat()},
+    {"kind": "session", "percent": 100, "resets_at": soon.isoformat()},
+    {"kind": "weekly_all", "percent": 100, "resets_at": "2020-01-01T00:00:00+00:00"},  # stale reading
+]}
+urllib.request.urlopen = lambda req, timeout: contextlib.nullcontext(io.BytesIO(json.dumps(usage).encode()))
+assert ca.live_until(ca.by_name("claude-work")) == later.timestamp()
+usage["limits"] = usage["limits"][3:]
+assert ca.live_until(ca.by_name("claude-work")) is None
+usage["limits"] = [{"kind": "weekly_all", "percent": 40, "resets_at": later.isoformat()}]
+usage["limits"] = usage["limits"][:1]
+assert ca.live_until(ca.by_name("claude-work")) is None
+ca.SCRIPT, urllib.request.urlopen = _script, _urlopen
+
+# pick: an unmarked account the live check finds used up is marked and skipped
+_live = ca.live_until
+ca.live_until = lambda a: time.time() + 600 if a["name"] == "claude-work" else None
+assert ca.pick("work")["name"] == "claude-work-2"
+assert ca._read_json(ca.STATE / "exhausted/claude-work.json")["text"].startswith("usage check:")
+(ca.STATE / "exhausted/claude-work.json").unlink()
+ca.live_until = _live
+
+# status line: below 100% it clears only the marks it wrote, never a per-model limit
+os.environ["CLAUDE_CONFIG_DIR"] = str(d / ".claude-work")
+low = json.dumps({"rate_limits": {"five_hour": {"used_percentage": 10}, "seven_day": {"used_percentage": 20}}})
+for text, kept in (("You've reached your Fable limit.", True), ("status line: window at 100%", False)):
+    ca._write_json(ca.STATE / "exhausted/claude-work.json", {"until": time.time() + 600, "text": text})
+    sys.stdin = io.StringIO(low)
+    ca.feed([])
+    assert (ca.STATE / "exhausted/claude-work.json").exists() == kept, text
+sys.stdin = sys.__stdin__
+(ca.STATE / "exhausted/claude-work.json").unlink(missing_ok=True)
+del os.environ["CLAUDE_CONFIG_DIR"]
 print("claude-account self-check ok")
 
 # login: a new account gets pool, directory, mirror links and the email/plan recorded

@@ -47,6 +47,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 HOME = Path.home()
@@ -57,12 +58,13 @@ STATE = STORE / "state" / "claude-accounts"
 BASE = Path(os.environ.get("CLAUDE_ACCOUNT_BASE", HOME / ".claude"))
 CLAUDE_BIN = os.environ.get("CLAUDE_ACCOUNT_BIN") or shutil.which("claude") or "claude"
 SCRIPT = Path(__file__).resolve()
-LIMIT_RE = re.compile(r"hit your (session|weekly|opus|sonnet|\w+) limit", re.I)
+LIMIT_RE = re.compile(r"(?:hit|reached) your (session|weekly|opus|sonnet|\w+) limit", re.I)
 RESET_RE = re.compile(r"resets\s+(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+)?"
                       r"(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2}),?\s+at\s+)?"
                       r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", re.I)
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
 # ---------------------------------------------------------------- config ----
@@ -171,13 +173,44 @@ def headroom(name):
         return None
 
 
+def live_until(acct):
+    """Latest reset among the account's limits that are at 100% (session,
+    weekly, per-model), read from the subscription usage endpoint, which spends
+    no tokens. None when every limit has room or the check cannot run."""
+    try:
+        tok = subprocess.run([str(SCRIPT.parent / "claude-token.sh"), acct["name"]],
+                             capture_output=True, text=True, timeout=10, check=False)
+    except subprocess.TimeoutExpired:
+        return None
+    if tok.returncode:
+        return None
+    req = urllib.request.Request(USAGE_URL, headers={"authorization": f"Bearer {tok.stdout}",
+                                                     "anthropic-beta": "oauth-2025-04-20"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            limits = json.load(r).get("limits") or []
+    except (OSError, ValueError):
+        return None
+    full = [dt.datetime.fromisoformat(l["resets_at"]).timestamp() if l.get("resets_at") else time.time() + 3600
+            for l in limits if (l.get("percent") or 0) >= 100]
+    full = [t for t in full if t > time.time()]
+    return max(full) if full else None
+
+
 def pick(pool, exclude=()):
     """First account of the pool in config order that is neither exhausted nor
     excluded: the pool drains its accounts one at a time, so the first one
-    reaches its reset while the later ones still hold their full window."""
-    cands = [a for a in accounts() if a["pool"] == pool and a["name"] not in exclude
-             and not exhausted_until(a["name"])]
-    return cands[0] if cands else None
+    reaches its reset while the later ones still hold their full window. An
+    account without a mark is checked live and marked when a limit is used up."""
+    for a in accounts():
+        if a["pool"] != pool or a["name"] in exclude or exhausted_until(a["name"]):
+            continue
+        until = live_until(a)
+        if not until:
+            return a
+        _write_json(STATE / "exhausted" / f"{a['name']}.json",
+                    {"until": until, "text": "usage check: a limit is at 100%", "at": time.time()})
+    return None
 
 
 def prefer(name):
@@ -474,7 +507,8 @@ def limit_hit():
     acct = account_of_env()
     if not acct:
         return 0
-    until = parse_reset(text) or time.time() + (7 * 86400 if "weekly" in text.lower() else 5 * 3600)
+    until = (parse_reset(text) or live_until(acct)
+             or time.time() + (7 * 86400 if "weekly" in text.lower() else 5 * 3600))
     _write_json(STATE / "exhausted" / f"{acct['name']}.json", {"until": until, "text": text, "at": time.time()})
     nxt = next_account(acct["pool"], exclude=[acct["name"]])
     tty = session_tty()
@@ -648,11 +682,13 @@ def feed(cmd):
                 win = data["rate_limits"].get(w) or {}
                 if win.get("used_percentage", 0) >= 100 and win.get("resets_at", 0) > time.time():
                     until = max(until or 0, win["resets_at"])
+            mark = STATE / "exhausted" / f"{acct['name']}.json"
             if until:
-                _write_json(STATE / "exhausted" / f"{acct['name']}.json",
-                            {"until": until, "text": "status line: window at 100%", "at": time.time()})
-            elif exhausted_until(acct["name"]):
-                (STATE / "exhausted" / f"{acct['name']}.json").unlink(missing_ok=True)
+                _write_json(mark, {"until": until, "text": "status line: window at 100%", "at": time.time()})
+            elif (_read_json(mark) or {}).get("text", "").startswith("status line:"):
+                # The status line sees only the 5-hour and weekly windows, so it
+                # clears only its own marks; a per-model limit stays marked.
+                mark.unlink(missing_ok=True)
     except ValueError:
         pass
     if cmd:
