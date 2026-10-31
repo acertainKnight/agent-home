@@ -25,7 +25,9 @@ account file inside it and reports signed out.
   run <pool> -- [claude args]   launch Claude on the pool's first account with
                                 headroom; after a limit, relaunch the same
                                 conversation on the next account (own pool,
-                                then spill pools; sleeps until the earliest
+                                then spill pools; a reply in the self chat
+                                within CHOICE_WINDOW picks a different one or
+                                starts the default at once; sleeps until the earliest
                                 reset when every account is out) with a
                                 starting message that says what happened;
                                 `auth ...` runs Claude directly on the caller's
@@ -44,6 +46,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -65,6 +68,9 @@ RESET_RE = re.compile(r"resets\s+(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\s+)?"
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CHAT_DB = HOME / "Library" / "Messages" / "chat.db"
+CHOICE_WINDOW = 300  # seconds a limit announcement waits for a reply naming the next account
+APPLE_EPOCH = 978307200  # chat.db dates are nanoseconds since 2001-01-01 UTC
 
 
 # ---------------------------------------------------------------- config ----
@@ -511,16 +517,19 @@ def limit_hit():
              or time.time() + (7 * 86400 if "weekly" in text.lower() else 5 * 3600))
     _write_json(STATE / "exhausted" / f"{acct['name']}.json", {"until": until, "text": text, "at": time.time()})
     nxt = next_account(acct["pool"], exclude=[acct["name"]])
+    choices = ([nxt["name"]] if nxt else []) + [
+        a["name"] for a in accounts()
+        if a["name"] not in (acct["name"], nxt and nxt["name"]) and not exhausted_until(a["name"])]
     tty = session_tty()
     note = {
         "session_id": payload.get("session_id"), "cwd": payload.get("cwd"), "from": acct["name"],
-        "pool": acct["pool"], "next": nxt["name"] if nxt else None, "until": until, "text": text,
-        "created": time.time(),
+        "pool": acct["pool"], "next": nxt["name"] if nxt else None, "choices": choices,
+        "until": until, "text": text, "created": time.time(),
     }
     _write_json(handoff_path(tty), note)
     announce(f"{acct['name']} hit its limit ({text.split('·')[0].strip()}). "
-             + (f"Continuing on {nxt['name']}; open that account on the phone to see the session."
-                if nxt else f"Every account is out; resuming at {_fmt_until(earliest_reset() or until)}."))
+             + (choice_prompt(choices) if nxt
+                else f"Every account is out; resuming at {_fmt_until(earliest_reset() or until)}."))
     root = claude_root_on_tty(tty) if tty else None
     if root:
         os.kill(root, signal.SIGTERM)
@@ -631,7 +640,7 @@ def run(pool, args):
         if not note or note.get("created", 0) < time.time() - 600:
             return code
         handoff_path(tty).unlink(missing_ok=True)
-        acct = by_name(note["next"]) if note.get("next") else wait_for_reset(pool)
+        acct = await_choice(note) or (by_name(note["next"]) if note.get("next") else wait_for_reset(pool))
         if not acct:
             return code
         launch = _resume_args(args, note["session_id"], resume_message(note, acct))
@@ -651,7 +660,7 @@ def _chat_guid():
 
 
 def imessage_send(text):
-    """One line to the self chat named in instance.yaml; no reply expected."""
+    """One line to the self chat named in instance.yaml."""
     guid = _chat_guid()
     if not guid:
         return False
@@ -665,6 +674,82 @@ def announce(text):
     print(f"[claude-account] {text}", file=sys.stderr)
     notify(text)
     imessage_send(text)
+
+
+def choice_prompt(choices):
+    minutes = CHOICE_WINDOW // 60
+    if len(choices) < 2:
+        return f"Continuing on {choices[0]}; open that account on the phone to see the session."
+    menu = ", ".join(f"{i} {n}" + (" (default)" if i == 1 else "") for i, n in enumerate(choices, 1))
+    return (f"Continuing on {choices[0]} in {minutes} min. Reply with a number or name to start now "
+            f"or pick another account: {menu}.")
+
+
+def _typedstream_text(blob):
+    """The plain string inside an NSAttributedString archive: it follows the
+    NSString marker as "+", a length (one byte, or 0x81 and two little-endian
+    bytes) and the UTF-8 bytes."""
+    if not blob:
+        return ""
+    i = blob.find(b"NSString")
+    if i < 0:
+        return ""
+    i = blob.find(b"+", i)
+    if i < 0 or i + 1 >= len(blob):
+        return ""
+    n = blob[i + 1]
+    i += 2
+    if n == 0x81:
+        n = int.from_bytes(blob[i:i + 2], "little")
+        i += 2
+    return blob[i:i + n].decode("utf-8", "replace")
+
+
+def imessage_replies(since):
+    """Texts in the self chat written after the unix time `since`, oldest first."""
+    guid = _chat_guid()
+    if not guid or not CHAT_DB.exists():
+        return []
+    try:
+        db = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
+        rows = db.execute(
+            "select m.text, m.attributedBody from message m "
+            "join chat_message_join j on j.message_id = m.ROWID join chat c on c.ROWID = j.chat_id "
+            "where c.guid = ? and m.date > ? order by m.date",
+            (guid, int((since - APPLE_EPOCH) * 1e9))).fetchall()
+        db.close()
+    except sqlite3.Error:
+        return []
+    return [(text or _typedstream_text(body)).strip() for text, body in rows]
+
+
+def parse_choice(text, choices):
+    """The account a reply names: its 1-based number in the menu or its name."""
+    t = text.strip().lower()
+    if t.isdigit() and 1 <= int(t) <= len(choices):
+        return choices[int(t) - 1]
+    return next((c for c in choices if c.lower() == t), None)
+
+
+def await_choice(note):
+    """Poll the self chat until CHOICE_WINDOW after the announcement for a reply
+    naming one of the note's choices; None when there is nothing to choose,
+    nobody answered, or Ctrl-C."""
+    choices = note.get("choices") or []
+    if len(choices) < 2:
+        return None
+    deadline = note["created"] + CHOICE_WINDOW
+    try:
+        while time.time() < deadline:
+            for text in imessage_replies(note["created"]):
+                name = parse_choice(text, choices)
+                if name:
+                    announce(f"Starting on {name}.")
+                    return by_name(name)
+            time.sleep(5)
+    except KeyboardInterrupt:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------- feed ------

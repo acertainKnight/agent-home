@@ -216,6 +216,32 @@ ca.handoff_path("ttysTEST").unlink()
 del os.environ["CLAUDE_CONFIG_DIR"]
 print("limit-hit self-check ok")
 
+# reply window: the announcement lists every account with headroom, default first; a reply
+# picks by number or name; a single option or no reply keeps the default
+(ca.STATE / "exhausted/claude-work-3.json").unlink()
+os.environ["CLAUDE_CONFIG_DIR"] = str(d / ".claude-work")
+sys.stdin = io.StringIO(json.dumps(payload))
+assert ca.limit_hit() == 0
+sys.stdin = sys.__stdin__
+del os.environ["CLAUDE_CONFIG_DIR"]
+note = ca._read_json(ca.handoff_path("ttysTEST"))
+assert note["next"] == "claude-work-3" and note["choices"] == ["claude-work-3", "claude-personal"], note
+ca.handoff_path("ttysTEST").unlink()
+ca._write_json(ca.STATE / "exhausted/claude-work-3.json", {"until": time.time() + 3600})
+assert ca.parse_choice("2", ["a", "b"]) == "b" and ca.parse_choice(" B ", ["a", "b"]) == "b"
+assert ca.parse_choice("3", ["a", "b"]) is None and ca.parse_choice("thanks", ["a", "b"]) is None
+blob = b"\x08NSString\x01\x94\x84\x01+\x81" + (300).to_bytes(2, "little") + b"x" * 300 + b"\x86"
+assert ca._typedstream_text(blob) == "x" * 300 and ca._typedstream_text(b"NSString\x01+\x02hi") == "hi"
+assert ca._typedstream_text(b"NSString\x01") == "" and ca._typedstream_text(b"NSString+") == ""
+assert "Reply" not in ca.choice_prompt(["a"]) and "1 a (default), 2 b" in ca.choice_prompt(["a", "b"])
+assert ca.await_choice({"choices": ["a"], "created": time.time()}) is None
+ca.imessage_replies = lambda since: ["sure", "2"]
+assert ca.await_choice({"choices": ["claude-personal", "claude-work-3"], "created": time.time()})["name"] == "claude-work-3"
+ca.imessage_replies = lambda since: []
+ca.CHOICE_WINDOW = 1
+assert ca.await_choice({"choices": ["claude-personal", "claude-work-3"], "created": time.time()}) is None
+print("reply-window self-check ok")
+
 # run loop: the stub Claude hits the limit on its first launch; the loop relaunches the same
 # session on the spill account with the starting message first, then exits when no note follows
 for n in ("claude-personal", "claude-work"):
@@ -238,6 +264,21 @@ assert launches()[0] == f"{d / '.claude-work'}|--permission-mode acceptEdits", l
 assert launches()[1].startswith("unset|[claude-account] This conversation moved from claude-work to claude-personal"), launches()
 assert log.read_text().rstrip().endswith("--resume s1 --permission-mode acceptEdits"), log.read_text()
 assert len(launches()) == 2, launches()
+
+# two accounts have headroom: without a reply the loop takes the default after the window;
+# a reply naming the other account relaunches there instead
+for reply, moved_to in (([], "claude-work-3"), (["2"], "claude-personal")):
+    log.unlink()
+    for n in ("claude-personal", "claude-work", "claude-work-3"):
+        (ca.STATE / f"exhausted/{n}.json").unlink(missing_ok=True)
+    ca.imessage_replies = lambda since, reply=reply: reply
+    sys.stdin = io.StringIO("")
+    assert ca.run("work", []) == 0
+    sys.stdin = sys.__stdin__
+    assert f"This conversation moved from claude-work to {moved_to}" in log.read_text(), log.read_text()
+ca.imessage_replies = lambda since: []
+ca._write_json(ca.STATE / "exhausted/claude-work-3.json", {"until": time.time() + 3600})
+print("reply-window run-loop self-check ok")
 
 # every account out: the loop sleeps until the earliest reset, then relaunches
 log.unlink()
