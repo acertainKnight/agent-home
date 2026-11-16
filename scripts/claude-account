@@ -36,13 +36,19 @@ account file inside it and reports signed out.
   feed -- <status-line cmd>     record rate_limits from the status-line JSON,
                                 then run the original status-line command
   rc-ensure                     one Remote Control server per pool (launchd)
+  desktop <pool|name>           open the Claude desktop app (macOS) on the
+                                pool's account with headroom, or on the named
+                                account; every account but the default runs its
+                                own badged copy of the app, side by side
   install                       shell lines, settings.json hook + status line,
-                                launch agent, state dir
+                                launch agent, state dir, one desktop launcher
+                                per pool in ~/Applications
 """
 import argparse
 import datetime as dt
 import json
 import os
+import plistlib
 import re
 import shutil
 import signal
@@ -51,6 +57,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 
 HOME = Path.home()
@@ -179,10 +186,9 @@ def headroom(name):
         return None
 
 
-def live_until(acct):
-    """Latest reset among the account's limits that are at 100% (session,
-    weekly, per-model), read from the subscription usage endpoint, which spends
-    no tokens. None when every limit has room or the check cannot run."""
+def usage_limits(acct):
+    """The account's limits (session, weekly, per-model) from the subscription
+    usage endpoint, which spends no tokens. None when the check cannot run."""
     try:
         tok = subprocess.run([str(SCRIPT.parent / "claude-token.sh"), acct["name"]],
                              capture_output=True, text=True, timeout=10, check=False)
@@ -194,11 +200,20 @@ def live_until(acct):
                                                      "anthropic-beta": "oauth-2025-04-20"})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            limits = json.load(r).get("limits") or []
+            return json.load(r).get("limits") or []
     except (OSError, ValueError):
         return None
+
+
+def _full(limits):
+    return [l for l in limits or [] if (l.get("percent") or 0) >= 100]
+
+
+def live_until(acct):
+    """Latest reset among the account's limits that are at 100%. None when
+    every limit has room or the check cannot run."""
     full = [dt.datetime.fromisoformat(l["resets_at"]).timestamp() if l.get("resets_at") else time.time() + 3600
-            for l in limits if (l.get("percent") or 0) >= 100]
+            for l in _full(usage_limits(acct))]
     full = [t for t in full if t > time.time()]
     return max(full) if full else None
 
@@ -927,6 +942,197 @@ def rc_ensure():
     return 0
 
 
+# -------------------------------------------------------------- desktop -----
+
+DESKTOP_APP = Path(os.environ.get("CLAUDE_ACCOUNT_APP", "/Applications/Claude.app"))
+SUPPORT = Path(os.environ.get("CLAUDE_ACCOUNT_SUPPORT", HOME / "Library" / "Application Support"))
+LAUNCHERS = Path(os.environ.get("CLAUDE_ACCOUNT_LAUNCHERS", HOME / "Applications"))
+LSREGISTER = ("/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+              "LaunchServices.framework/Support/lsregister")
+# What an app started from the Dock receives.
+DOCK_ENV = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING")
+LAUNCHER_SH = """#!/bin/sh
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH
+exec "{script}" desktop {pool}
+"""
+
+
+def desktop_badge(acct):
+    """Characters drawn on the icon of the account's copy of the desktop app:
+    the pool's initial outside the default account's pool, then the number the
+    account's name ends in. Read from the name, so `prefer` never changes it."""
+    default_pool = next((a["pool"] for a in accounts() if a["default"]), None)
+    letter = "" if acct["pool"] == default_pool else acct["pool"][:1].upper()
+    number = re.search(r"-(\d+)$", acct["name"])
+    return letter + (number.group(1) if number else "") or acct["pool"][:1].upper()
+
+
+def desktop_data_dir(acct):
+    """The desktop app's data directory for the account. It holds the app's
+    own login, so each account has one; the default account has the app's own."""
+    if acct["default"]:
+        return SUPPORT / "Claude"
+    return SUPPORT / ("Claude-" + "-".join(p.capitalize() for p in acct["name"].removeprefix("claude-").split("-")))
+
+
+def _bundle(app):
+    try:
+        with open(app / "Contents" / "Info.plist", "rb") as fh:
+            return plistlib.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _set_icon(badge, target):
+    subprocess.run(["osascript", "-l", "JavaScript", str(SCRIPT.parent / "badge-icon.js"),
+                    str(DESKTOP_APP), badge, str(target)], capture_output=True, timeout=60, check=False)
+
+
+def _app_running(app):
+    return subprocess.run(["pgrep", "-f", re.escape(str(app / "Contents" / "MacOS") + "/")],
+                          capture_output=True, check=False).returncode == 0
+
+
+def desktop_copy(acct):
+    """The app bundle that runs the account: the installed app for the default
+    account, otherwise a copy-on-write clone with the account's badge on its
+    icon, which macOS runs beside the installed app. The clone keeps the
+    installed app's signature, so the Keychain still releases the login stored
+    for the app. A clone behind the installed app's version is rebuilt, unless
+    it is running."""
+    if acct["default"]:
+        return DESKTOP_APP
+    clone = SUPPORT / "claude-account-desktop" / "apps" / f"Claude {desktop_badge(acct)}.app"
+    current = _bundle(clone).get("CFBundleVersion") == _bundle(DESKTOP_APP).get("CFBundleVersion")
+    if clone.exists() and (current or _app_running(clone)):
+        return clone
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    fresh = clone.with_suffix(".refreshing")
+    shutil.rmtree(fresh, ignore_errors=True)
+    subprocess.run(["cp", "-Rc", str(DESKTOP_APP), str(fresh)], check=True)
+    _set_icon(desktop_badge(acct), fresh)
+    shutil.rmtree(clone, ignore_errors=True)
+    fresh.rename(clone)
+    subprocess.run([LSREGISTER, "-f", str(clone)], capture_output=True, check=False)
+    return clone
+
+
+def block_updates(data_dir):
+    """Stop the copy on this data directory from updating itself. An update
+    replaces the bundle and relaunches it without its data directory, which
+    puts the default account's login in a window that carries this account's
+    badge. The app reads the policy from `<data dir>-3p/configLibrary`; a
+    configuration already there is left as it is."""
+    lib = Path(f"{data_dir}-3p") / "configLibrary"
+    if (lib / "_meta.json").exists():
+        return
+    entry = str(uuid.uuid4())
+    _write_json(lib / f"{entry}.json", {"disableAutoUpdates": True})
+    _write_json(lib / "_meta.json", {"appliedId": entry, "entries": [{"id": entry, "name": "Default"}]})
+
+
+def desktop_account(pool):
+    """The pool's pick; when every account has a limit at 100%, the first one
+    whose used-up limits are all per-model (its other models still answer),
+    else the pool's first account."""
+    members = [a for a in accounts() if a["pool"] == pool]
+    acct = pick(pool)
+    if acct or not members:
+        return acct
+    for a in members:
+        limits = usage_limits(a)
+        if limits is not None and all(l.get("scope") for l in _full(limits)):
+            return a
+    return members[0]
+
+
+def limit_note(acct, limits):
+    """One line naming the account's used-up limits, or None when none is."""
+    full = _full(limits)
+    if not full:
+        return None
+    parts = []
+    for l in full:
+        model = ((l.get("scope") or {}).get("model") or {}).get("display_name")
+        what = f"{model or (l.get('group') or l.get('kind') or 'usage').replace('_', ' ')} limit reached"
+        if l.get("resets_at"):
+            what += f", resets {_fmt_until(dt.datetime.fromisoformat(l['resets_at']).timestamp())}"
+        parts.append(what)
+    note = f"{acct['name']}: " + "; ".join(parts) + "."
+    week = next((l for l in limits if l.get("group") == "weekly" and not l.get("scope")), None)
+    if week and all(l.get("scope") for l in full):
+        note += f" Other models have {100 - (week.get('percent') or 0):.0f}% of the week left."
+    return note
+
+
+def desktop_login_mismatch(acct):
+    """True when the desktop data directory last signed in as a different
+    account than the one Claude Code holds for this account."""
+    seen = (_read_json(desktop_data_dir(acct) / "config.json") or {}).get("lastKnownAccountUuid")
+    want = ((_read_json(_claude_json(acct)) or {}).get("oauthAccount") or {}).get("accountUuid")
+    return bool(seen and want and seen != want)
+
+
+def desktop(target):
+    if not DESKTOP_APP.exists():
+        print(f"the Claude desktop app is not installed at {DESKTOP_APP}", file=sys.stderr)
+        return 1
+    acct = desktop_account(target) if target in pools() else by_name(target)
+    if not acct:
+        print(f"no pool or account named {target}", file=sys.stderr)
+        return 1
+    cmd = ["open", "-a", str(desktop_copy(acct))]
+    if not acct["default"]:
+        data = desktop_data_dir(acct)
+        block_updates(data)
+        cmd += ["--env", f"CLAUDE_CONFIG_DIR={acct['dir']}", "--args", f"--user-data-dir={data}"]
+    # `open` hands its own environment to the app, and the app hands it to
+    # every coding session it starts. A launch from inside a Claude session
+    # would pass that session's identity on.
+    env = {k: os.environ[k] for k in DOCK_ENV if k in os.environ}
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    subprocess.run(cmd, env=env, check=False)
+    notes = [limit_note(acct, usage_limits(acct))]
+    if desktop_login_mismatch(acct):
+        notes.append(f"{acct['name']}: the desktop app is signed in to a different account. "
+                     "Sign out in that window, then sign in as this account.")
+    for note in filter(None, notes):
+        print(note)
+        notify(note)
+    print(f"opened {acct['name']}")
+    return 0
+
+
+def install_launchers():
+    """One app per pool in ~/Applications that runs `desktop <pool>`. A
+    launcher is a regular app: an agent app (LSUIElement) does not stay in the
+    Dock. An app of another origin under a launcher's name moves to backups."""
+    if sys.platform != "darwin" or not DESKTOP_APP.exists():
+        return
+    default_pool = next((a["pool"] for a in accounts() if a["default"]), None)
+    for pool in pools():
+        app = LAUNCHERS / f"Claude {pool.capitalize()}.app"
+        ident = f"com.agent-home.claude-desktop.{pool}"
+        if app.exists() and _bundle(app).get("CFBundleIdentifier") != ident:
+            backups = STORE / "backups"
+            backups.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(app), str(backups / f"{app.name}.{int(time.time())}"))
+            print(f"{app.name}: the existing app moved to {backups}")
+        shutil.rmtree(app, ignore_errors=True)
+        exe = app / "Contents" / "MacOS" / "launcher"
+        exe.parent.mkdir(parents=True)
+        exe.write_text(LAUNCHER_SH.format(script=SCRIPT, pool=pool))
+        exe.chmod(0o755)
+        with open(app / "Contents" / "Info.plist", "wb") as fh:
+            plistlib.dump({"CFBundleExecutable": "launcher", "CFBundleIdentifier": ident,
+                           "CFBundleName": app.stem, "CFBundlePackageType": "APPL",
+                           "CFBundleVersion": "1"}, fh)
+        _set_icon("" if pool == default_pool else pool[:1].upper(), app)
+        subprocess.run([LSREGISTER, "-f", str(app)], capture_output=True, check=False)
+        print(f"desktop launcher: {app}")
+
+
 # -------------------------------------------------------------- install -----
 
 ZSH_LINE = 'source "$HOME/.agent-home/lib/scripts/claude-accounts.zsh"  # claude-account: pools + switching'
@@ -995,6 +1201,7 @@ def install():
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/com.agent-home.claude-rc"], capture_output=True, check=False)
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, check=False)
     print("launch agent com.agent-home.claude-rc (re)loaded")
+    install_launchers()
     mirror()
     print("\nAccounts:")
     status()
@@ -1031,6 +1238,7 @@ def main(argv):
     sp = sub.add_parser("feed")
     sp.add_argument("args", nargs=argparse.REMAINDER)
     sub.add_parser("rc-ensure")
+    sub.add_parser("desktop").add_argument("target")
     sub.add_parser("install")
     a = p.parse_args(argv)
 
@@ -1070,6 +1278,8 @@ def main(argv):
         return feed(args)
     elif a.cmd == "rc-ensure":
         return rc_ensure()
+    elif a.cmd == "desktop":
+        return desktop(a.target)
     elif a.cmd == "install":
         return install()
     return 0
