@@ -218,6 +218,18 @@ that mirrors `~/.claude` by symlink (recipe: `~/.agent-home/claude-mirror.json`)
   built-in wait, or quit.
 - `claude-account status` shows login, plan, headroom and exhaustion per account
   in pool order. `claude-account clear <name>` drops a wrong exhausted mark.
+- `claude-account desktop <pool|name>` (macOS) opens the Claude desktop app on
+  the pool's account with headroom, or on a named account. The default account
+  runs `/Applications/Claude.app`. Every other account runs its own copy of the
+  app, side by side with the others: a copy-on-write clone under
+  `~/Library/Application Support/claude-account-desktop/apps` with a badge on
+  its icon (`W` for the work pool, `2` for `claude-personal-2`), its own data
+  directory (`~/Library/Application Support/Claude-Work`), the account's
+  `CLAUDE_CONFIG_DIR` for coding sessions, and self-update switched off. A
+  launch rebuilds a copy that is behind the installed app. Sign in once in each
+  copy's window. `claude-account install` puts one launcher per pool in
+  `~/Applications` (`Claude Personal`, `Claude Work`) to keep in the Dock.
+  Anthropic does not document running several copies of the desktop app.
 
 ### Proving it's the membership, not API credits
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Self-check for scripts/claude-account: pool pick order, exhausted skip,
-reset-time parsing, mirror links, unknown-name detection, resume args.
+reset-time parsing, mirror links, unknown-name detection, resume args,
+desktop copies and launchers.
 Run: python3 test_claude_account.py"""
 import datetime as dt
 import importlib.machinery
@@ -18,6 +19,9 @@ d = Path(tempfile.mkdtemp())
 os.environ["AGENT_HOME"] = str(d / ".agent-home")
 os.environ["AGENT_HOME_CONFIG"] = str(d / ".agent-home/config.json")
 os.environ["CLAUDE_ACCOUNT_BASE"] = str(d / ".claude")
+os.environ["CLAUDE_ACCOUNT_APP"] = str(d / "Claude.app")
+os.environ["CLAUDE_ACCOUNT_SUPPORT"] = str(d / "support")
+os.environ["CLAUDE_ACCOUNT_LAUNCHERS"] = str(d / "launchers")
 spec = importlib.util.spec_from_loader("ca", importlib.machinery.SourceFileLoader("ca", str(REPO / "scripts" / "claude-account")))
 ca = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ca)
@@ -307,3 +311,107 @@ r = subprocess.run([str(REPO / "scripts" / "claude-account"), "run", "auto", "--
                    capture_output=True, text=True, check=True)
 assert r.stdout.strip() == f"{d / '.claude-work-2'}|auth login", r.stdout
 print("auth pass-through self-check ok")
+
+# desktop: the default account runs the installed app; every other account runs
+# a badged clone on its own data directory with the update policy in place
+import plistlib
+
+def write_app(version):
+    (d / "Claude.app/Contents").mkdir(parents=True, exist_ok=True)
+    with open(d / "Claude.app/Contents/Info.plist", "wb") as fh:
+        plistlib.dump({"CFBundleVersion": version, "CFBundleIdentifier": "com.example.claude"}, fh)
+
+write_app("1")
+personal, work, work2 = (ca.by_name(n) for n in ("claude-personal", "claude-work", "claude-work-2"))
+assert [ca.desktop_badge(a) for a in (work, work2)] == ["W", "W2"]
+assert ca.desktop_badge({"name": "claude-personal-2", "pool": "personal"}) == "2"
+assert ca.desktop_data_dir(personal) == d / "support/Claude"
+assert ca.desktop_data_dir(work2) == d / "support/Claude-Work-2"
+
+week = {"kind": "weekly_all", "group": "weekly", "percent": 61, "resets_at": "2030-01-01T14:00:00+00:00", "scope": None}
+fable = {"kind": "weekly_scoped", "group": "weekly", "percent": 100, "resets_at": "2030-01-01T14:00:00+00:00",
+         "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}}
+reset = ca._fmt_until(dt.datetime.fromisoformat("2030-01-01T14:00:00+00:00").timestamp())
+assert ca.limit_note(work, [week, fable]) == \
+    f"claude-work: Fable limit reached, resets {reset}. Other models have 39% of the week left."
+assert ca.limit_note(work, [dict(week, percent=100), fable]) == \
+    f"claude-work: weekly limit reached, resets {reset}; Fable limit reached, resets {reset}."
+assert ca.limit_note(work, [week]) is None and ca.limit_note(work, None) is None
+
+# a pool with every account at a limit opens the one whose other models still answer
+_pick, _limits = ca.pick, ca.usage_limits
+ca.pick = lambda pool, exclude=(): None
+ca.usage_limits = lambda a: [dict(week, percent=100)] if a["name"] == "claude-work" else [week, fable]
+assert ca.desktop_account("work")["name"] == "claude-work-2"
+ca.usage_limits = lambda a: [dict(week, percent=100)]
+assert ca.desktop_account("work")["name"] == "claude-work"
+ca.pick = lambda pool, exclude=(): next(a for a in ca.accounts() if a["pool"] == pool)
+ca.usage_limits = lambda a: [week]
+
+if sys.platform == "darwin":
+    calls, icons, running = [], [], [False]
+    ca._set_icon = lambda badge, target: icons.append((badge, Path(target).name))
+    ca._app_running = lambda app: running[0]
+    _run = subprocess.run
+    def fake_run(cmd, **kw):
+        if cmd[0] == "cp":
+            return _run(cmd, **kw)
+        calls.append((cmd, kw.get("env")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    ca.subprocess.run = fake_run
+    os.environ["CLAUDE_CODE_SESSION_ID"] = "leak"
+    try:
+        clone = d / "support/claude-account-desktop/apps/Claude W.app"
+        data = d / "support/Claude-Work"
+        assert ca.desktop("work") == 0
+        cmd, env = next(c for c in calls if c[0][0] == "open")
+        assert cmd == ["open", "-a", str(clone), "--env", f"CLAUDE_CONFIG_DIR={d / '.claude-work'}",
+                       "--args", f"--user-data-dir={data}"], cmd
+        assert not [k for k in env if k.startswith(("CLAUDE", "ANTHROPIC"))], env
+        assert ca._bundle(clone)["CFBundleVersion"] == "1" and icons == [("W", "Claude W.refreshing")], icons
+        policy = d / "support/Claude-Work-3p/configLibrary"
+        meta = json.load(open(policy / "_meta.json"))
+        assert json.load(open(policy / f"{meta['appliedId']}.json")) == {"disableAutoUpdates": True}
+        ca.block_updates(data)
+        assert json.load(open(policy / "_meta.json")) == meta, "an existing configuration is left alone"
+
+        # a clone behind the installed app is rebuilt, but never while it runs
+        write_app("2")
+        running[0] = True
+        assert ca.desktop("work") == 0 and ca._bundle(clone)["CFBundleVersion"] == "1"
+        running[0] = False
+        assert ca.desktop("work") == 0 and ca._bundle(clone)["CFBundleVersion"] == "2" and len(icons) == 2
+
+        calls.clear()
+        assert ca.desktop("personal") == 0
+        assert [c[0] for c in calls if c[0][0] == "open"] == [["open", "-a", str(d / "Claude.app")]], calls
+        assert ca.desktop("nowhere") == 1
+
+        # the data directory last signed in as another account
+        (d / ".claude-work/.claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "work"}}))
+        (data / "config.json").parent.mkdir(parents=True, exist_ok=True)
+        (data / "config.json").write_text(json.dumps({"lastKnownAccountUuid": "personal"}))
+        assert ca.desktop_login_mismatch(work)
+        (data / "config.json").write_text(json.dumps({"lastKnownAccountUuid": "work"}))
+        assert not ca.desktop_login_mismatch(work)
+
+        # launchers: one regular app per pool; an app of another origin is kept in backups
+        old = d / "launchers/Claude Work.app/Contents"
+        old.mkdir(parents=True)
+        with open(old / "Info.plist", "wb") as fh:
+            plistlib.dump({"CFBundleIdentifier": "com.example.old", "LSUIElement": True}, fh)
+        icons.clear()
+        ca.install_launchers()
+        ca.install_launchers()
+        info = ca._bundle(d / "launchers/Claude Work.app")
+        assert info["CFBundleIdentifier"] == "com.agent-home.claude-desktop.work" and "LSUIElement" not in info, info
+        exe = d / "launchers/Claude Work.app/Contents/MacOS/launcher"
+        assert os.access(exe, os.X_OK) and exe.read_text().rstrip().endswith('claude-account" desktop work')
+        kept = [p for p in (d / ".agent-home/backups").iterdir() if p.name.startswith("Claude Work.app.")]
+        assert len(kept) == 1 and ca._bundle(kept[0])["CFBundleIdentifier"] == "com.example.old", kept
+        assert ("", "Claude Personal.app") in icons and ("W", "Claude Work.app") in icons, icons
+    finally:
+        ca.subprocess.run = _run
+        del os.environ["CLAUDE_CODE_SESSION_ID"]
+ca.pick, ca.usage_limits = _pick, _limits
+print("desktop self-check ok")
